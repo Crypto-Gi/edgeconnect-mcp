@@ -578,6 +578,15 @@ class Server:
             record["error"] = text[:300]
         self.audit.write(record)
 
+    def audit_refused(self, client: Optional[str], reason: str, status: int) -> None:
+        """A request the HTTP transport turned away (wrong origin, address or token). Never records the token."""
+        if self.audit is None:
+            return
+        now = datetime.now(timezone.utc)
+        record = {"ts": now.isoformat(timespec="milliseconds"), "day": now.strftime("%A"), "session": self.session, "id": uuid.uuid4().hex[:12],
+                  "tool": "http_refused", "client": client or "unknown", "outcome": "refused", "status": status, "error": reason[:300]}
+        self.audit.write(record)
+
     def _action(self, name: str, method: str, path: str) -> str:
         """The spec's summary of the operation, so the log says what a call did, not only its path."""
         orchestrator = self.orchestrators.get(name)

@@ -111,16 +111,16 @@ def make_http_server(server: Any, port: int, token: str, read_token: Optional[st
                 return self._reply(404, {"error": "not found"})
             origin = self.headers.get("Origin")
             if origin and origin.rstrip("/").lower() not in origins:
-                return self._reply(403, {"error": "origin not allowed"})  # a web page in a browser
+                return self._refuse_audited(403, "origin not allowed", "origin {!r} not allowed".format(origin[:100]))  # a web page in a browser
             client = self._client()
             if client is None or not any(client in network for network in networks):
-                return self._reply(403, {"error": "client address {} not allowed; see mcp_http_allowed_clients".format(client)})
+                return self._refuse_audited(403, "client address {} not allowed; see mcp_http_allowed_clients".format(client))
             auth = self.headers.get("Authorization") or ""
             given = (auth[7:].strip() if auth[:7].lower() == "bearer " else "").encode()
             full = hmac.compare_digest(given, token.encode())
             read = read_token is not None and hmac.compare_digest(given, read_token.encode())
             if not (full or read):
-                return self._reply(401, {"error": "missing or wrong access token"}, {"WWW-Authenticate": "Bearer"})
+                return self._refuse_audited(401, "missing or wrong access token", headers={"WWW-Authenticate": "Bearer"})
             if self.headers.get("Transfer-Encoding"):
                 return self._reply(411, {"error": "send a Content-Length body, not chunked"})
             if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
@@ -130,7 +130,8 @@ def make_http_server(server: Any, port: int, token: str, read_token: Optional[st
             except ValueError:
                 return self._reply(411, {"error": "Content-Length required"})
             if not 0 <= length <= MAX_BODY:
-                return self._reply(413, {"error": "body larger than {} bytes".format(MAX_BODY)})
+                self._reply(413, {"error": "body larger than {} bytes".format(MAX_BODY)})
+                return self._discard(length)
             try:
                 message = json.loads(self.rfile.read(length))
             except ValueError:
@@ -145,6 +146,24 @@ def make_http_server(server: Any, port: int, token: str, read_token: Optional[st
                 return self._reply(202, None)
             code = (response.get("error") or {}).get("code") if _is_modern(self.headers, message) else None
             self._reply(404 if code == METHOD_NOT_FOUND else 400 if code in (INVALID_PARAMS, UNSUPPORTED_VERSION) else 200, response)
+
+        def _refuse_audited(self, status: int, message: str, detail: Optional[str] = None, headers: Optional[Mapping[str, str]] = None) -> None:
+            client = self._client()
+            server.audit_refused(str(client) if client else self.client_address[0], detail or message, status)
+            self._reply(status, {"error": message}, headers)
+
+        def _discard(self, length: int) -> None:
+            # Closing with the body unread resets the connection, and a proxy such as Caddy then shows its own 502 instead of our 413.
+            self.connection.settimeout(5)
+            left = min(length, 4 * MAX_BODY)
+            try:
+                while left > 0:
+                    chunk = self.rfile.read(min(65536, left))
+                    if not chunk:
+                        break
+                    left -= len(chunk)
+            except OSError:
+                pass
 
         def _refuse(self) -> None:
             self._reply(405, {"error": "only POST /mcp is supported"}, {"Allow": "POST"})

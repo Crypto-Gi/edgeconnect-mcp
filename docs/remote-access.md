@@ -97,9 +97,13 @@ This runs the server directly on the machine (any [install](../README.md#install
    ```caddyfile
    mcp.example.internal {
    	tls internal
-   	reverse_proxy 127.0.0.1:8765
+   	reverse_proxy 127.0.0.1:8765 {
+   		request_buffers 4MB
+   	}
    }
    ```
+
+   `request_buffers` makes Caddy send a `Content-Length` header. Without it, a client that streams its request (some HTTP/2 clients do) gets `411 send a Content-Length body, not chunked`, because the server does not accept chunked bodies.
 
 3. Run Caddy. If you run Caddy in Docker, it needs host networking to reach the server on 127.0.0.1:
 
