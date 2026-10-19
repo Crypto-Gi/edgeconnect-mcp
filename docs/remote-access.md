@@ -103,7 +103,7 @@ This runs the server directly on the machine (any [install](../README.md#install
    }
    ```
 
-   `request_buffers` makes Caddy send a `Content-Length` header. Without it, a client that streams its request (some HTTP/2 clients do) gets `411 send a Content-Length body, not chunked`, because the server does not accept chunked bodies.
+   `request_buffers` makes Caddy send a `Content-Length` header. Without it, a client that streams its request (some HTTP/2 clients do) gets `411 send a Content-Length body, not chunked`, because the server does not accept chunked bodies. This fixes streamed HTTP/2 requests (tested). A client that sends HTTP/1.1 `Transfer-Encoding: chunked` still gets the 411 through Caddy; MCP clients normally send a `Content-Length`.
 
 3. Run Caddy. If you run Caddy in Docker on Linux, it needs host networking to reach the server on 127.0.0.1:
 
