@@ -72,9 +72,9 @@ Every request needs `Authorization: Bearer <token>`. The server refuses to start
 - isn't `POST /mcp` with a JSON body;
 - has a body over 2 MB.
 
-It drops a connection that stalls for 30 seconds, and serves one request at a time.
+It drops a connection that stalls for 30 seconds, and serves requests in parallel (up to 8 at once; more get a 503 with `Retry-After`).
 
-**How the client address is found.** When the request comes straight from a trusted proxy (`mcp_http_trusted_proxies`), the client is the last entry of that proxy's `X-Forwarded-For` header. Otherwise the client is the connecting address, and any `X-Forwarded-For` it sends is ignored. So a client can't claim an allowed address by sending the header itself. The token remains the real access control, and the address list is a second check.
+**How the client address is found.** When the request comes straight from a trusted proxy (`mcp_http_trusted_proxies`), the client is the last entry of that proxy's `X-Forwarded-For` header. Otherwise the client is the connecting address, and any `X-Forwarded-For` it sends is ignored. So a client can't claim an allowed address by sending the header itself. A write confirmation code only works for the address found this way, so everyone who reaches the server through one address (every client behind a Docker bridge, say) shares it. The token remains the real access control, and the address list is a second check.
 
 Point your client at the proxy's URL. In Claude Code:
 
@@ -97,9 +97,13 @@ This runs the server directly on the machine (any [install](../README.md#install
    ```caddyfile
    mcp.example.internal {
    	tls internal
-   	reverse_proxy 127.0.0.1:8765
+   	reverse_proxy 127.0.0.1:8765 {
+   		request_buffers 4MB
+   	}
    }
    ```
+
+   `request_buffers` makes Caddy send a `Content-Length` header. Without it, a client that streams its request (some HTTP/2 clients do) gets `411 send a Content-Length body, not chunked`, because the server does not accept chunked bodies.
 
 3. Run Caddy. If you run Caddy in Docker, it needs host networking to reach the server on 127.0.0.1:
 
@@ -120,7 +124,7 @@ Caddy sets `X-Forwarded-For` from the real peer, and arrives from 127.0.0.1, so 
 The image runs as a non-root user and needs nothing from PyPI. Build it from a clone:
 
 ```bash
-git clone --branch v0.2.0 https://github.com/Crypto-Gi/edgeconnect-mcp.git
+git clone --branch v0.2.1 https://github.com/Crypto-Gi/edgeconnect-mcp.git
 cd edgeconnect-mcp
 docker build -t edgeconnect-mcp .
 ```

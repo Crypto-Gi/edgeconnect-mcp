@@ -27,6 +27,7 @@ class AuditTrail:
         self.log = log
         self._lock = threading.Lock()
         self._file = _open_private(path, "a") if path else None
+        self._syslog_target = syslog
         self._syslog = _syslog_handler(syslog) if syslog else None
         self._db = _open_sqlite(sqlite) if sqlite else None
 
@@ -54,7 +55,19 @@ class AuditTrail:
         if self._syslog:
             if len(line) > SYSLOG_MAX:
                 line = json.dumps(dict({k: v for k, v in record.items() if k != "body"}, body_omitted=True), ensure_ascii=True, default=str)
-            self._syslog.emit(logging.LogRecord("edgeconnect-mcp", logging.INFO, "", 0, "edgeconnect-mcp: " + line, None, None))
+            record_ = logging.LogRecord("edgeconnect-mcp", logging.INFO, "", 0, "edgeconnect-mcp: " + line, None, None)
+            try:
+                self._syslog.emit(record_)
+            except OSError:
+                # SysLogHandler never reconnects a dropped TCP connection, so build a new handler and retry once. If the
+                # server is still down this raises, the old handler stays, and the next record tries again.
+                try:
+                    fresh = _syslog_handler(self._syslog_target)  # type: ignore[arg-type]
+                except ConfigurationError as exc:
+                    raise OSError(str(exc))
+                self._syslog.close()
+                self._syslog = fresh
+                self._syslog.emit(record_)
 
     def flush(self) -> None:
         if self._file:

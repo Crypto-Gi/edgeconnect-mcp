@@ -358,7 +358,7 @@ class Server:
     def tools(self) -> List[Dict[str, Any]]:
         orch = {"type": "string", "description": "Orchestrator nickname from list_orchestrators (default: {})".format(self.default)}
         query = {"type": "object", "description": "Query-string parameters", "additionalProperties": True}
-        path = {"type": "string", "description": "Path relative to /gms/rest with path parameters filled in, e.g. /appliance or /appliance/2.NE"}
+        path = {"type": "string", "description": "Path relative to /gms/rest with path parameters filled in, e.g. /appliance or /gms/versions"}
         max_chars = {"type": "integer", "description": "Truncate the response text to this many characters (default {})".format(DEFAULT_MAX_CHARS)}
         return [
             {"name": "list_orchestrators", "description": "List configured Orchestrators and whether writes and appliance passthrough writes are enabled for each.",
@@ -457,8 +457,8 @@ class Server:
                 return code
             found = self._pending.pop(str(code), None)
         if found is None or not hmac.compare_digest(found[0], key):
-            raise ToolError("confirmation {!r} is unknown, expired, already used, or was issued for a different request or caller; "
-                            "call api_write without confirmation to get a new code, and show the user the change again".format(code))
+            raise ToolError("confirmation {!r} is unknown, expired, already used, or was issued for a different request or caller. A code is spent by any attempt, "
+                            "even a refused one. Call api_write without confirmation to get a new code, and show the user the change again".format(code))
         return None
 
     def _call(self, orchestrator: Orchestrator, method: str, arguments: Mapping[str, Any]) -> Any:
@@ -576,6 +576,15 @@ class Server:
         record.update(outcome="error" if error else "ok", duration_ms=int((time.monotonic() - started) * 1000), response_chars=len(text))
         if error:
             record["error"] = text[:300]
+        self.audit.write(record)
+
+    def audit_refused(self, client: Optional[str], reason: str, status: int) -> None:
+        """A request the HTTP transport turned away (wrong origin, address or token). Never records the token."""
+        if self.audit is None:
+            return
+        now = datetime.now(timezone.utc)
+        record = {"ts": now.isoformat(timespec="milliseconds"), "day": now.strftime("%A"), "session": self.session, "id": uuid.uuid4().hex[:12],
+                  "tool": "http_refused", "client": client or "unknown", "outcome": "refused", "status": status, "error": reason[:300]}
         self.audit.write(record)
 
     def _action(self, name: str, method: str, path: str) -> str:

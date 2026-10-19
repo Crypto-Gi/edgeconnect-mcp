@@ -23,7 +23,7 @@ It reads the same `.env` format as [edgeconnect-orchestrator-automation](https:/
 | The MCP server only, for any client | One [server command](#install-the-server), then [connect your client](docs/clients.md) |
 | The guide skill in another agent (Codex, OpenCode, VS Code, Cursor, Windsurf, Devin and more) | [`npx skills add`](#add-the-guide-skill), plus the server above |
 
-Everything installs straight from this GitHub repository, pinned to release `v0.2.0`, so a later change to the repository never reaches you until you change the version in the command. New versions are listed under [Releases](https://github.com/Crypto-Gi/edgeconnect-mcp/releases).
+Everything installs straight from this GitHub repository, pinned to release `v0.2.1`, so a later change to the repository never reaches you until you change the version in the command. New versions are listed under [Releases](https://github.com/Crypto-Gi/edgeconnect-mcp/releases).
 
 **Requirements:** Python 3.9 or later for the server, on Linux, macOS or Windows. Node.js 18+ for the `npx` commands; uv, pipx or Docker only for those routes. You also need an Orchestrator REST API key.
 
@@ -33,7 +33,7 @@ Everything installs straight from this GitHub repository, pinned to release `v0.
 
    ```bash
    mkdir -p ~/.edgeconnect-mcp
-   curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/v0.2.0/.env.example -o ~/.edgeconnect-mcp/.env
+   curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/v0.2.1/.env.example -o ~/.edgeconnect-mcp/.env
    chmod 600 ~/.edgeconnect-mcp/.env
    ```
 
@@ -48,11 +48,11 @@ Everything installs straight from this GitHub repository, pinned to release `v0.
 3. Install the plugin. It runs the server with `python3` and reads `~/.edgeconnect-mcp/.env`:
 
    ```bash
-   claude plugin marketplace add 'Crypto-Gi/edgeconnect-mcp#v0.2.0'
+   claude plugin marketplace add 'Crypto-Gi/edgeconnect-mcp#v0.2.1'
    claude plugin install edgeconnect@edgeconnect-mcp
    ```
 
-   Inside Claude Code the same is `/plugin marketplace add Crypto-Gi/edgeconnect-mcp#v0.2.0`, then `/plugin install edgeconnect@edgeconnect-mcp`.
+   Inside Claude Code the same is `/plugin marketplace add Crypto-Gi/edgeconnect-mcp#v0.2.1`, then `/plugin install edgeconnect@edgeconnect-mcp`.
 
 4. Restart Claude Code and ask: "list my EdgeConnect orchestrators", then "show the appliances on lab".
 
@@ -62,15 +62,15 @@ Pick one. Each gives you the `edgeconnect-mcp` command; pass it `--dotenv /absol
 
 | Route | Command |
 |---|---|
-| npx (runs the bundled Python server) | `npx -y github:Crypto-Gi/edgeconnect-mcp#v0.2.0 --dotenv /absolute/path/.env` |
-| uvx | `uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.0 edgeconnect-mcp --dotenv /absolute/path/.env` |
-| pipx | `pipx install git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.0` |
-| Docker | `docker build -t edgeconnect-mcp https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.0`, then `docker run -i --rm --env-file /absolute/path/.env edgeconnect-mcp` |
+| npx (runs the bundled Python server) | `npx -y github:Crypto-Gi/edgeconnect-mcp#v0.2.1 --dotenv /absolute/path/.env` |
+| uvx | `uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.1 edgeconnect-mcp --dotenv /absolute/path/.env` |
+| pipx | `pipx install git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.1` |
+| Docker | `docker build -t edgeconnect-mcp https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.1`, then `docker run -i --rm --env-file /absolute/path/.env edgeconnect-mcp` |
 
 Or clone and install into a virtual environment. Upgrading pip matters on macOS's built-in Python 3.9, whose pip is too old for editable installs:
 
 ```bash
-git clone --branch v0.2.0 https://github.com/Crypto-Gi/edgeconnect-mcp.git
+git clone --branch v0.2.1 https://github.com/Crypto-Gi/edgeconnect-mcp.git
 cd edgeconnect-mcp
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
@@ -83,7 +83,7 @@ The npx route looks for `python3` (or `python`) on `PATH`; set `EDGECONNECT_PYTH
 Register the command with your client. For Claude Code:
 
 ```bash
-claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.0 edgeconnect-mcp --dotenv /absolute/path/.env
+claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.1 edgeconnect-mcp --dotenv /absolute/path/.env
 ```
 
 [docs/clients.md](docs/clients.md) has the config for Claude Desktop, Codex, OpenCode, VS Code, Cursor, Windsurf and Devin. To run the server on another machine or behind an HTTPS proxy, see [Remote access](#remote-access).
@@ -98,7 +98,7 @@ claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeco
 | `api_get` | Any documented GET. |
 | `api_write` | Any documented POST, PUT, PATCH or DELETE, only on Orchestrators with writes enabled. |
 
-Paths are relative to `/gms/rest`, for example `/appliance` or `/appliance/2.NE`. Responses are truncated to `max_chars` (default 60,000) so one call cannot flood the conversation.
+Paths are relative to `/gms/rest`, for example `/appliance` or `/gms/versions`. Responses are truncated to `max_chars` (default 60,000) so one call cannot flood the conversation.
 
 ## Guide skill
 
@@ -115,9 +115,9 @@ The playbooks are for reference only. Every operation the skill names passed in 
 - **Other agents:** the open [`skills`](https://github.com/vercel-labs/skills) installer copies it into each agent's skills folder:
 
   ```bash
-  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.0                                     # pick agents interactively
-  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.0 -a codex opencode windsurf devin -y  # or name them
-  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.0 -g -a claude-code -y                # -g: for your user, not this project
+  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.1                                     # pick agents interactively
+  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.1 -a codex opencode windsurf devin -y  # or name them
+  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.1 -g -a claude-code -y                # -g: for your user, not this project
   ```
 
   It supports Claude Code, Codex, OpenCode, GitHub Copilot (VS Code), Cursor, Windsurf, Devin for Terminal and about 50 more.
@@ -152,7 +152,7 @@ python3 skills/edgeconnect-guide/scripts/check_links.py --inventory <inventory>/
 - **High-risk blocklist.** Even with writes on, whole categories of dangerous writes are refused. See [below](#high-risk-blocklist).
 - **Secret redaction.** API keys are only sent as the `X-Auth-Token` header, and secrets in responses are replaced with restorable tokens. See [below](#secret-redaction).
 - **Rate limits per Orchestrator.** Reads default to 10 per second and writes to 2 per second, each with a burst of twice that. Over the limit, calls wait rather than fail, so scripts slow down instead of breaking.
-- **Audit trail.** Every tool call is appended as one JSON line to `~/.edgeconnect-mcp/audit.jsonl` (file 0600, folder 0700): UTC timestamp and weekday, session and call id, client address, tool, Orchestrator, method, path, what the operation does (its API summary), for writes the step (`awaiting_confirmation`, `confirmed` or `executed`) and the request body, redacted query, outcome, error, duration and response size. Secrets never reach it: bodies hold `<REDACTED:…>` tokens, and anything typed in clear under a secret-named key is masked. Optionally the same records also go to a syslog server (`mcp_audit_syslog`) and a SQLite database (`mcp_audit_sqlite`). Every write is also logged to stderr (the MCP client's server log).
+- **Audit trail.** Every tool call is appended as one JSON line to `~/.edgeconnect-mcp/audit.jsonl` (file 0600, folder 0700): UTC timestamp and weekday, session and call id, client address, tool, Orchestrator, method, path, what the operation does (its API summary), for writes the step (`awaiting_confirmation`, `confirmed` or `executed`) and the request body, redacted query, outcome, error, duration and response size. Secrets never reach it: bodies hold `<REDACTED:…>` tokens, and anything typed in clear under a secret-named key is masked. Optionally the same records also go to a syslog server (`mcp_audit_syslog`) and a SQLite database (`mcp_audit_sqlite`). In HTTP mode, requests turned away for a wrong token, client address or origin are logged too (`tool` is `http_refused`, with the client address and the reason, never the token). Every write is also logged to stderr (the MCP client's server log).
 - **Untrusted results.** API results carry a note that their text is data, not instructions, and the server instructions say the same. Invisible and direction-changing characters (zero-width, bidi overrides, Unicode tag characters) are shown as `\uXXXX` JSON escapes, so hidden text is visible while the value still decodes exactly.
 - **Strict TLS.** Certificates are verified and redirects are refused, so the API key can't follow a redirect to another host or to plain HTTP. A self-signed lab Orchestrator is supported by pinning its certificate (`<nickname>_tls_sha256`) or trusting a private CA (`<nickname>_ca_bundle`), never by turning verification off.
 - **No network listener by default.** The server uses stdio unless you pass `--http`. HTTP listens on 127.0.0.1 unless `mcp_http_listen` says otherwise (the container image sets 0.0.0.0). Every request needs the token and is checked against the address allowlist on its own; requests run in parallel, up to 8 at once, and more get a 503 to retry.
@@ -189,7 +189,7 @@ edgeconnect-mcp --dotenv .env --list-high-risk lab
 
 ### Secret redaction
 
-String values under keys such as `apiKey`, `password`, `token`, `presharedKey`, `authKey`, `privateKey`, `accountKey` and `rocommunity`, and any PEM private key, come back as `<REDACTED:…>` tokens. Redaction goes by field name; the names cover every field the 9.7.1 API spec describes as a password, secret, key, community string or credential, and a test checks them. Flags and numbers (`passwordMinLen`, `csrfProtection`) stay readable.
+String values under keys such as `apiKey`, `password`, `token`, `presharedKey`, `authKey`, `privateKey`, `accountKey` and `rocommunity`, and any PEM private key, come back as `<REDACTED:…>` tokens. Redaction goes by field name. The names were checked against every property in the 9.7.1 API spec that is described as a password, secret, key, community string or credential; a test covers a list of them, but it does not read the spec itself, so a field added in a later release can slip through. Flags and numbers (`passwordMinLen`, `csrfProtection`) stay readable.
 
 Write a token back unchanged and the server puts the real value in, so read-modify-write of BGP, OSPF, overlays or tunnels round-trips exactly. A token is only restored under the same key it was read from, on the same API path or a parent or child of it (for appliance passthrough, the same `url`), on the same Orchestrator, during the same server run. Anything else is refused: a plain `<REDACTED>`, a token moved into a readable field or another feature's secret field, or a token from another Orchestrator or an earlier run. So a secret can never be overwritten with a placeholder or copied somewhere it could leak.
 

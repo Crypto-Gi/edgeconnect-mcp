@@ -93,10 +93,25 @@ class HttpTransportTest(unittest.TestCase):
         self.assertEqual(self.post(message, **{"X-Forwarded-For": "203.0.113.9, 10.1.2.7"})[0], 200)  # the proxy's own entry is last
         self.assertEqual(self.post(message, **{"Content-Type": "text/plain"})[0], 415)
         self.assertEqual(self.post(b"{}", **{"Content-Length": str(2 * 1024 * 1024 + 1)})[0], 413)
+        self.assertEqual(self.post(b"x" * (3 * 1024 * 1024))[0], 413)  # a real oversized body is read off the socket, so a proxy sees the 413
         self.assertEqual(self.post([message])[0], 400)
         self.assertEqual(self.post(message, method="GET")[0], 405)
         self.assertEqual(self.post(message, path="/other")[0], 404)
         self.assertEqual(self.client.calls, [])
+
+    def test_refused_requests_are_audited_without_the_token(self):
+        message = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        wrong = "wrongtoken" + "x" * 30
+        self.post(message, token=wrong)
+        self.post(message, Origin="https://evil.example")
+        self.post(message, **{"X-Forwarded-For": "203.0.113.9"})
+        self.server.audit.flush()
+        text = Path(self.tmp.name, "audit.jsonl").read_text()
+        records = [json.loads(line) for line in text.splitlines()]
+        self.assertEqual([(r["tool"], r["outcome"], r["status"]) for r in records], [("http_refused", "refused", 401), ("http_refused", "refused", 403), ("http_refused", "refused", 403)])
+        self.assertIn("evil.example", records[1]["error"])
+        self.assertEqual(records[2]["client"], "203.0.113.9")
+        self.assertNotIn(wrong, text)
 
     def test_read_token_cannot_write_and_audit_names_the_client(self):
         status, body = self.tool("api_write", token=READ_TOKEN, method="POST", path="/ipObjects/addressGroup", body={"name": "g"})
