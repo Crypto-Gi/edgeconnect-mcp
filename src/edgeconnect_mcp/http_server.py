@@ -120,7 +120,7 @@ def make_http_server(server: Any, port: int, token: str, read_token: Optional[st
             full = hmac.compare_digest(given, token.encode())
             read = read_token is not None and hmac.compare_digest(given, read_token.encode())
             if not (full or read):
-                return self._refuse_audited(401, "missing or wrong access token", headers={"WWW-Authenticate": "Bearer"})
+                return self._refuse_audited(401, "missing or wrong access token", "wrong access token" if given else "missing access token", {"WWW-Authenticate": "Bearer"})
             if self.headers.get("Transfer-Encoding"):
                 return self._reply(411, {"error": "send a Content-Length body, not chunked"})
             if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
@@ -149,7 +149,7 @@ def make_http_server(server: Any, port: int, token: str, read_token: Optional[st
 
         def _refuse_audited(self, status: int, message: str, detail: Optional[str] = None, headers: Optional[Mapping[str, str]] = None) -> None:
             client = self._client()
-            server.audit_refused(str(client) if client else self.client_address[0], detail or message, status)
+            server.audit_refused(str(client) if client else self.client_address[0], detail or message, status, peer=self.client_address[0])
             self._reply(status, {"error": message}, headers)
 
         def _discard(self, length: int) -> None:

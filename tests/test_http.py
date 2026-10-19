@@ -103,14 +103,17 @@ class HttpTransportTest(unittest.TestCase):
         message = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
         wrong = "wrongtoken" + "x" * 30
         self.post(message, token=wrong)
+        self.post(message, token=None)
         self.post(message, Origin="https://evil.example")
         self.post(message, **{"X-Forwarded-For": "203.0.113.9"})
         self.server.audit.flush()
         text = Path(self.tmp.name, "audit.jsonl").read_text()
         records = [json.loads(line) for line in text.splitlines()]
-        self.assertEqual([(r["tool"], r["outcome"], r["status"]) for r in records], [("http_refused", "refused", 401), ("http_refused", "refused", 403), ("http_refused", "refused", 403)])
-        self.assertIn("evil.example", records[1]["error"])
-        self.assertEqual(records[2]["client"], "203.0.113.9")
+        self.assertEqual([(r["tool"], r["outcome"], r["status"]) for r in records], [("http_refused", "refused", 401)] * 2 + [("http_refused", "refused", 403)] * 2)
+        self.assertEqual([r["error"] for r in records[:2]], ["wrong access token", "missing access token"])
+        self.assertIn("evil.example", records[2]["error"])
+        self.assertEqual((records[3]["client"], records[3]["peer"]), ("203.0.113.9", "127.0.0.1"))  # the client, and the proxy it came through
+        self.assertNotIn("peer", records[0])  # a direct connection has no separate proxy
         self.assertNotIn(wrong, text)
 
     def test_read_token_cannot_write_and_audit_names_the_client(self):

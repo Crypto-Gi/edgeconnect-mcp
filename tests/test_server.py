@@ -353,6 +353,43 @@ class McpServerTest(unittest.TestCase):
         second.close()
         self.assertEqual(len(got_second[0].splitlines()), 1)  # a new connection was made
 
+    def test_tcp_syslog_loses_nothing_when_the_server_restarts_between_records(self):
+        import socket
+        import threading
+
+        def listen(port=0):
+            sock = socket.socket()
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", port))
+            sock.listen(1)
+            sock.settimeout(5)
+            got = []
+
+            def accept():
+                try:
+                    conn, _ = sock.accept()
+                except OSError:
+                    return
+                conn.settimeout(5)
+                got.append(conn.recv(65536).decode())
+                conn.close()
+            thread = threading.Thread(target=accept, daemon=True)
+            thread.start()
+            return sock, got, thread
+
+        first, got_first, thread_first = listen()
+        port = first.getsockname()[1]
+        server = Server(self.server.orchestrators, default="prod", log=lambda line: None, audit_syslog="tcp://127.0.0.1:{}".format(port))
+        call = lambda: server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "api_get", "arguments": {"path": "/appliance"}}})
+        call()
+        thread_first.join(5)
+        first.close()  # the syslog server restarts: its side of the connection is closed before the next record
+        second, got_second, thread_second = listen(port)
+        call()
+        thread_second.join(5)
+        second.close()
+        self.assertEqual([len(text.splitlines()) for text in got_second], [1])  # the very next record arrives, none is lost
+
     def test_audit_goes_to_sqlite_and_syslog_too(self):
         import socket
         import sqlite3
