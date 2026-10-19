@@ -315,6 +315,44 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual((records[1]["body"], records[1]["phase"], records[1]["action"]), ('{"name": "g"}', "executed", "Create address group"))
         self.assertIn(records[0]["day"], ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
 
+    def test_tcp_syslog_reconnects_after_the_server_comes_back(self):
+        import socket
+        import threading
+
+        def listen(port=0):
+            sock = socket.socket()
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", port))
+            sock.listen(1)
+            got = []
+
+            def accept():
+                conn, _ = sock.accept()
+                conn.settimeout(5)
+                got.append(conn.recv(65536).decode())
+                conn.close()
+            thread = threading.Thread(target=accept, daemon=True)
+            thread.start()
+            return sock, got, thread
+
+        first, got_first, thread_first = listen()
+        port = first.getsockname()[1]
+        reports = []
+        server = Server(self.server.orchestrators, default="prod", log=reports.append, audit_syslog="tcp://127.0.0.1:{}".format(port))
+        call = lambda: server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "api_get", "arguments": {"path": "/appliance"}}})
+        call()
+        thread_first.join(5)
+        self.assertEqual(len(got_first[0].splitlines()), 1)
+        first.close()
+        for _ in range(3):
+            self.assertFalse(call()["result"]["isError"])  # server gone: calls still work
+        self.assertTrue(any("audit syslog failed" in line for line in reports))
+        second, got_second, thread_second = listen(port)
+        call()
+        thread_second.join(5)
+        second.close()
+        self.assertEqual(len(got_second[0].splitlines()), 1)  # a new connection was made
+
     def test_audit_goes_to_sqlite_and_syslog_too(self):
         import socket
         import sqlite3

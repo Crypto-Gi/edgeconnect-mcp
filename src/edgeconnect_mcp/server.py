@@ -358,7 +358,7 @@ class Server:
     def tools(self) -> List[Dict[str, Any]]:
         orch = {"type": "string", "description": "Orchestrator nickname from list_orchestrators (default: {})".format(self.default)}
         query = {"type": "object", "description": "Query-string parameters", "additionalProperties": True}
-        path = {"type": "string", "description": "Path relative to /gms/rest with path parameters filled in, e.g. /appliance or /appliance/2.NE"}
+        path = {"type": "string", "description": "Path relative to /gms/rest with path parameters filled in, e.g. /appliance or /gms/versions"}
         max_chars = {"type": "integer", "description": "Truncate the response text to this many characters (default {})".format(DEFAULT_MAX_CHARS)}
         return [
             {"name": "list_orchestrators", "description": "List configured Orchestrators and whether writes and appliance passthrough writes are enabled for each.",

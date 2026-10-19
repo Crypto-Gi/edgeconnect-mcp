@@ -98,7 +98,7 @@ claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeco
 | `api_get` | Any documented GET. |
 | `api_write` | Any documented POST, PUT, PATCH or DELETE, only on Orchestrators with writes enabled. |
 
-Paths are relative to `/gms/rest`, for example `/appliance` or `/appliance/2.NE`. Responses are truncated to `max_chars` (default 60,000) so one call cannot flood the conversation.
+Paths are relative to `/gms/rest`, for example `/appliance` or `/gms/versions`. Responses are truncated to `max_chars` (default 60,000) so one call cannot flood the conversation.
 
 ## Guide skill
 
@@ -189,7 +189,7 @@ edgeconnect-mcp --dotenv .env --list-high-risk lab
 
 ### Secret redaction
 
-String values under keys such as `apiKey`, `password`, `token`, `presharedKey`, `authKey`, `privateKey`, `accountKey` and `rocommunity`, and any PEM private key, come back as `<REDACTED:…>` tokens. Redaction goes by field name; the names cover every field the 9.7.1 API spec describes as a password, secret, key, community string or credential, and a test checks them. Flags and numbers (`passwordMinLen`, `csrfProtection`) stay readable.
+String values under keys such as `apiKey`, `password`, `token`, `presharedKey`, `authKey`, `privateKey`, `accountKey` and `rocommunity`, and any PEM private key, come back as `<REDACTED:…>` tokens. Redaction goes by field name. The names were checked against every property in the 9.7.1 API spec that is described as a password, secret, key, community string or credential; a test covers a list of them, but it does not read the spec itself, so a field added in a later release can slip through. Flags and numbers (`passwordMinLen`, `csrfProtection`) stay readable.
 
 Write a token back unchanged and the server puts the real value in, so read-modify-write of BGP, OSPF, overlays or tunnels round-trips exactly. A token is only restored under the same key it was read from, on the same API path or a parent or child of it (for appliance passthrough, the same `url`), on the same Orchestrator, during the same server run. Anything else is refused: a plain `<REDACTED>`, a token moved into a readable field or another feature's secret field, or a token from another Orchestrator or an earlier run. So a secret can never be overwritten with a placeholder or copied somewhere it could leak.
 
