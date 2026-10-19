@@ -457,8 +457,8 @@ class Server:
                 return code
             found = self._pending.pop(str(code), None)
         if found is None or not hmac.compare_digest(found[0], key):
-            raise ToolError("confirmation {!r} is unknown, expired, already used, or was issued for a different request or caller; "
-                            "call api_write without confirmation to get a new code, and show the user the change again".format(code))
+            raise ToolError("confirmation {!r} is unknown, expired, already used, or was issued for a different request or caller. A code is spent by any attempt, "
+                            "even a refused one. Call api_write without confirmation to get a new code, and show the user the change again".format(code))
         return None
 
     def _call(self, orchestrator: Orchestrator, method: str, arguments: Mapping[str, Any]) -> Any:

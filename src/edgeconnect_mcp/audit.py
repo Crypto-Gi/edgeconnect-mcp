@@ -61,7 +61,10 @@ class AuditTrail:
             except OSError:
                 # SysLogHandler never reconnects a dropped TCP connection, so build a new handler and retry once. If the
                 # server is still down this raises, the old handler stays, and the next record tries again.
-                fresh = _syslog_handler(self._syslog_target)  # type: ignore[arg-type]
+                try:
+                    fresh = _syslog_handler(self._syslog_target)  # type: ignore[arg-type]
+                except ConfigurationError as exc:
+                    raise OSError(str(exc))
                 self._syslog.close()
                 self._syslog = fresh
                 self._syslog.emit(record_)
