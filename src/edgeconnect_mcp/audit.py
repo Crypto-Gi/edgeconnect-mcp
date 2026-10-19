@@ -7,6 +7,7 @@ import json
 import logging
 import logging.handlers
 import os
+import select
 import socket
 import sqlite3
 import sys
@@ -57,6 +58,8 @@ class AuditTrail:
                 line = json.dumps(dict({k: v for k, v in record.items() if k != "body"}, body_omitted=True), ensure_ascii=True, default=str)
             record_ = logging.LogRecord("edgeconnect-mcp", logging.INFO, "", 0, "edgeconnect-mcp: " + line, None, None)
             try:
+                if self._syslog.socktype == socket.SOCK_STREAM and _peer_closed(self._syslog.socket):
+                    raise OSError("syslog server closed the connection")  # a send would succeed and the record be lost
                 self._syslog.emit(record_)
             except OSError:
                 # SysLogHandler never reconnects a dropped TCP connection, so build a new handler and retry once. If the
@@ -97,6 +100,23 @@ def _open_sqlite(path: str) -> sqlite3.Connection:
     return db
 
 
+def _peer_closed(sock: socket.socket) -> bool:
+    """A syslog server never sends, so a readable TCP socket means it closed or reset the connection."""
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+        return bool(readable) and sock.recv(1, socket.MSG_PEEK) == b""
+    except (OSError, ValueError):
+        return True
+
+
+class _SysLogHandler(logging.handlers.SysLogHandler):
+    def close(self) -> None:
+        # A handler whose connect failed has no socket, yet logging still closes it at exit and printed a traceback.
+        if getattr(self, "socket", None) is None:
+            return logging.Handler.close(self)
+        super().close()
+
+
 def _raise(record: logging.LogRecord) -> None:
     raise OSError("syslog send failed")
 
@@ -113,7 +133,7 @@ def _syslog_handler(target: str) -> logging.handlers.SysLogHandler:
         address = (parts.hostname, parts.port or 514)
         socktype = socket.SOCK_STREAM if parts.scheme == "tcp" else socket.SOCK_DGRAM
     try:
-        handler = logging.handlers.SysLogHandler(address=address, facility=logging.handlers.SysLogHandler.LOG_AUTHPRIV, socktype=socktype)
+        handler = _SysLogHandler(address=address, facility=logging.handlers.SysLogHandler.LOG_AUTHPRIV, socktype=socktype)
     except OSError as exc:
         raise ConfigurationError("mcp_audit_syslog {}: cannot connect ({})".format(target, exc))
     handler.handleError = _raise  # type: ignore[assignment]  # so AuditTrail.write sees and reports the failure

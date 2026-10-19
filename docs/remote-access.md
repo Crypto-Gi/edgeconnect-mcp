@@ -105,11 +105,13 @@ This runs the server directly on the machine (any [install](../README.md#install
 
    `request_buffers` makes Caddy send a `Content-Length` header. Without it, a client that streams its request (some HTTP/2 clients do) gets `411 send a Content-Length body, not chunked`, because the server does not accept chunked bodies.
 
-3. Run Caddy. If you run Caddy in Docker, it needs host networking to reach the server on 127.0.0.1:
+3. Run Caddy. If you run Caddy in Docker on Linux, it needs host networking to reach the server on 127.0.0.1:
 
    ```bash
    docker run -d --name caddy --network host -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" -v caddy_data:/data caddy:2.10.2
    ```
+
+   Docker Desktop (macOS, Windows) was tested without host networking: use `reverse_proxy host.docker.internal:8765` and publish the port with `-p 127.0.0.1:443:443` instead of `--network host`. The server then sees the request from 127.0.0.1 with the Docker gateway (for example 172.17.0.1) as the client, so add that address to `mcp_http_allowed_clients`; the refusal message names it.
 
 4. Allow your clients' networks in `.env`, then restart the server:
 
