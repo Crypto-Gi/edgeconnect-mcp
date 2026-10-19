@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project]
+name = "edgeconnect-mcp"
+version = "0.2.0"
+description = "Secure MCP server for the HPE Aruba EdgeConnect Orchestrator REST API"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+keywords = ["edgeconnect", "aruba", "sd-wan", "mcp", "orchestrator"]
+dependencies = []
+
+[project.scripts]
+edgeconnect-mcp = "edgeconnect_mcp.server:main"

@@ -1,0 +1,10 @@
+{
+  "name": "edgeconnect-mcp",
+  "version": "0.2.0",
+  "description": "Secure MCP server for the HPE Aruba EdgeConnect Orchestrator REST API (runs the bundled Python server)",
+  "license": "Apache-2.0",
+  "bin": { "edgeconnect-mcp": "bin/edgeconnect-mcp.js" },
+  "files": ["bin/", "src/edgeconnect_mcp/*.py"],
+  "engines": { "node": ">=18" },
+  "repository": { "type": "git", "url": "git+https://github.com/Crypto-Gi/edgeconnect-mcp.git" }
+}

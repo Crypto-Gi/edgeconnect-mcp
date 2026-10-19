@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+**/__pycache__
+*.egg-info
+build
+dist
+tests
+skills
+node_modules

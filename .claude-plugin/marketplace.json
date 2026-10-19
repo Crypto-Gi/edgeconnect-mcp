@@ -1,0 +1,14 @@
+{
+  "name": "edgeconnect-mcp",
+  "description": "HPE Aruba EdgeConnect Orchestrator MCP server and guide skill",
+  "owner": {
+    "name": "Crypto-Gi"
+  },
+  "plugins": [
+    {
+      "name": "edgeconnect",
+      "source": "./",
+      "description": "EdgeConnect Orchestrator MCP server plus the edgeconnect-guide skill"
+    }
+  ]
+}

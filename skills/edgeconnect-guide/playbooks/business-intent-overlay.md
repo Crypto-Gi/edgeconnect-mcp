@@ -1,0 +1,27 @@
+# Create a business intent overlay
+
+> **Reference only.** Every step below was run on Orchestrator 9.7.1 (ECOS 9.6.2.1 lab appliances and an ECOS 9.6.4.0 production appliance, test objects only) between 2026-10-16 and 2026-10-18. Your version and configuration can behave differently: read first, show the change, get a yes, and verify each step yourself.
+
+Create an overlay that matches traffic, picks WAN labels and a bonding policy, then apply it to appliances. Background: [overlays](../cards/overlays-bio.md).
+
+## Before you start
+- The WAN labels the overlay will use must already exist and be mapped to interfaces: see [interface labels](../cards/interfaces-labels.md). Hubs must be approved and have those labels.
+- A new overlay has no effect on an appliance until it is applied (association). Overlays are matched top to bottom, and a new overlay goes last, so check the priority afterwards.
+- Decide: name, `topologyType` (1 mesh, 2 hub-and-spoke), hubs, primary and backup labels and any `multiCrossConnect` groups, `bondingPolicy`, loss, latency and jitter thresholds, breakout `policyList`. Recommended starting values (not required): loss 5% and latency 150 ms for real-time, 8-12% and 200-300 ms for the rest.
+- Lab name: `ztest_overlay`; match only a documentation range (for example `198.51.100.0/24`), apply to one lab appliance only, then remove it.
+
+## Steps
+1. Call `api_get` on `GET /gms/overlays/config` (all overlays, with their ids), `GET /gms/overlays/priority`, `GET /gms/overlays/config/maxNumOfOverlays`, `GET /gms/overlays/association` and `GET /gms/interfaceLabels` (label ids for `wanPorts`) and `GET /overlayManagerProperties` (whether orchestration is on). Keep the full overlay list and the priority mapping as the rollback snapshot.
+2. Call `describe_operation` on `POST /gms/overlays/config` and `PUT /gms/overlays/config` (needs `overlayId`). Do not write the body from the documented fields alone: on 9.7.1 a body with only those (the spec example included) returns HTTP 500. Copy an existing overlay from step 1.
+3. Build the body from the `api_get` results (no call yet) as a full copy of an existing overlay from step 1 (the default overlay carries every key): remove `id`, set `name`, rename the ACL in `match.overlayAcl` to `Overlay_<name>`, then change the intent fields: `topology.topologyType`, `topology.hubs` (hub `nePk` list), `wanPorts` (label ids as strings), the match criteria inside the renamed ACL (or `match.interfaceLabel`), and `internetPolicy.policyList`. Read-back `wanPorts` uses `primary`, `backup` and `multiCrossConnect` (`{"<group>": [label ids]}`); `secondary` may be missing or an empty list, and `crossConnect` does not appear. `multiCrossConnect` may only name labels in the primary or backup list, or the server answers HTTP 400 "You cannot cross connect ports that are not used in the primary or backup list."
+4. Show the user the full body. After a yes, call `api_write` `POST /gms/overlays/config`. The response body is the new `overlayId` as a bare number (for example `5`); the new overlay goes last in the priority order.
+5. Read back with `api_get` `GET /gms/overlays/config` (`overlayId`; it returns a one-element list) and compare intent fields: name, topology type and hubs, label lists, bonding policy, thresholds. A full-object post reads back equal; only partial bodies read back different. To fix a difference, show the corrected full body and after a yes `api_write` `PUT /gms/overlays/config` with query `overlayId`.
+6. Apply to appliances: show the user the appliance list. After a yes, `api_write` `POST /gms/overlays/association` with body `[{"nePk": "<nePk>", "overlayId": "<id>"}]` (`overlayId` as a string), then read `GET /gms/overlays/association`. If the order matters, read `GET /gms/overlays/priority` and reorder with `POST /gms/overlays/priority`. The body is the full map `{"<rank>": <overlayId as integer>}`, rank 1 highest, every overlay once, for example `{"1": 5, "2": 1}`.
+7. Check the tunnels it built: `api_get` `GET /tunnels2/bonded` with `overlayId` (and `nePk`) until the bonded tunnels are up. Underlay tunnels need the labels on both ends to be able to reach each other (NAT pairing, cross connect): see [tunnels](../cards/tunnels.md).
+8. Rollback: after a yes, `api_write` `POST /gms/overlays/association/remove` with the same list as step 6, `[{"nePk": "<nePk>", "overlayId": "<id>"}]`, then `DELETE /gms/overlays/config` with query `overlayId`. The delete also removes the overlay from the priority order and closes the gap, so nothing needs restoring after it. If step 6 reordered anything, restore the step 1 order with `POST /gms/overlays/priority` (the full map from the step 1 read). Restoring a changed overlay is `PUT /gms/overlays/config` with the step 1 object. Re-read `GET /gms/overlays/priority` and `GET /gms/overlays/association` and compare with the snapshot.
+
+## Verify
+- `GET /gms/overlays/config` (`overlayId`) shows the intended name, topology, labels and bonding policy.
+- `GET /gms/overlays/association` lists exactly the intended appliances.
+- `GET /tunnels2/bonded` (filter `overlayId`) shows tunnels up; `POST /alarm/appliance` (body `nePks`) shows no new tunnel alarms.
+- Traffic lands in the overlay: check a flow with `GET /flow` (needs `nePk`, `maxFlows`); see [flows and stats](../cards/flows-stats.md). If the wrong overlay matches, check priority and the overlay ACL.

@@ -1,0 +1,31 @@
+{
+  "name": "edgeconnect",
+  "version": "0.2.0",
+  "description": "EdgeConnect Orchestrator MCP server plus the edgeconnect-guide skill (doc map, tested operations, playbooks)",
+  "author": {
+    "name": "Crypto-Gi"
+  },
+  "license": "Apache-2.0",
+  "repository": "https://github.com/Crypto-Gi/edgeconnect-mcp",
+  "keywords": [
+    "edgeconnect",
+    "aruba",
+    "sd-wan",
+    "orchestrator",
+    "mcp"
+  ],
+  "mcpServers": {
+    "edgeconnect": {
+      "command": "python3",
+      "args": [
+        "-m",
+        "edgeconnect_mcp",
+        "--dotenv",
+        "${HOME}/.edgeconnect-mcp/.env"
+      ],
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PLUGIN_ROOT}/src"
+      }
+    }
+  }
+}
