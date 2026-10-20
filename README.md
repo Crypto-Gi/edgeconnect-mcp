@@ -72,7 +72,7 @@ The assistant shows you that change. Only after your yes does it repeat the call
 | The MCP server only, for any client | One [server command](#install-the-server), then [connect your client](docs/clients.md) |
 | The guide skill in another agent (Codex, OpenCode, VS Code, Cursor, Windsurf, Devin and more) | [`npx skills add`](#add-the-guide-skill), plus the server above |
 
-Everything installs straight from this GitHub repository, pinned to release `v0.2.1`, so a later change to the repository never reaches you until you change the version in the command. New versions are listed under [Releases](https://github.com/Crypto-Gi/edgeconnect-mcp/releases).
+Everything installs straight from this GitHub repository, pinned to release `v0.2.2`, so a later change to the repository never reaches you until you change the version in the command. New versions are listed under [Releases](https://github.com/Crypto-Gi/edgeconnect-mcp/releases).
 
 **Requirements:** Python 3.9 or later for the server, on Linux, macOS or Windows. Node.js 18+ for the `npx` commands; uv, pipx or Docker only for those routes. You also need an Orchestrator REST API key: HPE's [API Key](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/orchestrator/server/api-key/) page shows how to create one. Give it Read-Only permission unless you plan to turn writes on.
 
@@ -82,7 +82,7 @@ Everything installs straight from this GitHub repository, pinned to release `v0.
 
    ```bash
    mkdir -p ~/.edgeconnect-mcp
-   curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/v0.2.1/.env.example -o ~/.edgeconnect-mcp/.env
+   curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/v0.2.2/.env.example -o ~/.edgeconnect-mcp/.env
    chmod 600 ~/.edgeconnect-mcp/.env
    ```
 
@@ -97,11 +97,11 @@ Everything installs straight from this GitHub repository, pinned to release `v0.
 3. Install the plugin. It runs the server with `python3` and reads `~/.edgeconnect-mcp/.env`:
 
    ```bash
-   claude plugin marketplace add 'Crypto-Gi/edgeconnect-mcp#v0.2.1'
+   claude plugin marketplace add 'Crypto-Gi/edgeconnect-mcp#v0.2.2'
    claude plugin install edgeconnect@edgeconnect-mcp
    ```
 
-   Inside Claude Code the same is `/plugin marketplace add Crypto-Gi/edgeconnect-mcp#v0.2.1`, then `/plugin install edgeconnect@edgeconnect-mcp`.
+   Inside Claude Code the same is `/plugin marketplace add Crypto-Gi/edgeconnect-mcp#v0.2.2`, then `/plugin install edgeconnect@edgeconnect-mcp`.
 
 4. Restart Claude Code and ask: "list my EdgeConnect orchestrators", then "show the appliances on lab". The first question calls `list_orchestrators`, which needs no network and should return this for the settings above:
 
@@ -118,15 +118,15 @@ Pick one. Each gives you the `edgeconnect-mcp` command; pass it `--dotenv /absol
 
 | Route | Command |
 |---|---|
-| npx (runs the bundled Python server) | `npx -y github:Crypto-Gi/edgeconnect-mcp#v0.2.1 --dotenv /absolute/path/.env` |
-| uvx | `uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.1 edgeconnect-mcp --dotenv /absolute/path/.env` |
-| pipx | `pipx install git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.1` |
-| Docker | `docker build -t edgeconnect-mcp https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.1`, then `docker run -i --rm --env-file /absolute/path/.env edgeconnect-mcp` |
+| npx (runs the bundled Python server) | `npx -y github:Crypto-Gi/edgeconnect-mcp#v0.2.2 --dotenv /absolute/path/.env` |
+| uvx | `uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2 edgeconnect-mcp --dotenv /absolute/path/.env` |
+| pipx | `pipx install git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2` |
+| Docker | `docker build -t edgeconnect-mcp https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.2`, then `docker run -i --rm --env-file /absolute/path/.env edgeconnect-mcp` |
 
 Or clone and install into a virtual environment. Upgrading pip matters on macOS's built-in Python 3.9, whose pip is too old for editable installs:
 
 ```bash
-git clone --branch v0.2.1 https://github.com/Crypto-Gi/edgeconnect-mcp.git
+git clone --branch v0.2.2 https://github.com/Crypto-Gi/edgeconnect-mcp.git
 cd edgeconnect-mcp
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
@@ -139,7 +139,7 @@ The npx route looks for `python3` (or `python`) on `PATH`; set `EDGECONNECT_PYTH
 Register the command with your client. For Claude Code:
 
 ```bash
-claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.1 edgeconnect-mcp --dotenv /absolute/path/.env
+claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2 edgeconnect-mcp --dotenv /absolute/path/.env
 ```
 
 [docs/clients.md](docs/clients.md) has the config for Claude Desktop, Codex, OpenCode, VS Code, Cursor, Windsurf and Devin. To run the server on another machine or behind an HTTPS proxy, see [Remote access](#remote-access).
@@ -159,9 +159,9 @@ The playbooks are for reference only. Every operation the skill names passed in 
 - **Other agents:** the open [`skills`](https://github.com/vercel-labs/skills) installer copies it into each agent's skills folder:
 
   ```bash
-  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.1                                     # pick agents interactively
-  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.1 -a codex opencode windsurf devin -y  # or name them
-  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.1 -g -a claude-code -y                # -g: for your user, not this project
+  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.2                                     # pick agents interactively
+  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.2 -a codex opencode windsurf devin -y  # or name them
+  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.2 -g -a claude-code -y                # -g: for your user, not this project
   ```
 
   It supports Claude Code, Codex, OpenCode, GitHub Copilot (VS Code), Cursor, Windsurf, Devin for Terminal and about 50 more.
