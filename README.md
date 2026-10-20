@@ -116,7 +116,7 @@ Restart your client and ask "list my EdgeConnect orchestrators". That calls `lis
 
 Then ask "show the appliances on lab". That one reaches the Orchestrator, so a wrong address, key or certificate shows up there.
 
-These commands install the latest code on `main`, which only changes through pull requests that pass CI. To pin a release, to use uv, pipx, Docker or a clone, or to update, see [docs/install.md](docs/install.md).
+The [install guide](docs/install.md) walks through every route the same way, step by step: plugin, npx, uvx, pipx, a clone and Docker, each with its guide-skill command, plus updating and pinning a release. These commands install the latest code on `main`, which only changes through pull requests that pass CI.
 
 ## Guide skill
 

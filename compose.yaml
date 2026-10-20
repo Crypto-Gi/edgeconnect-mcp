@@ -4,6 +4,7 @@ services:
   edgeconnect-mcp:
     build: .
     image: edgeconnect-mcp
+    container_name: edgeconnect-mcp  # fixed name, so `docker exec -i edgeconnect-mcp ...` works as written
     command: ["--http", "8765"]
     env_file: .env
     ports:
