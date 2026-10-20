@@ -60,6 +60,26 @@ With writes enabled, the first `api_write` call changes nothing. This is the ser
 
 The assistant shows you that change. Only after your yes does it repeat the call with the code, and only then does the Orchestrator receive it. Reads come back with secrets already replaced: in the same run, `GET /appliance` returned each appliance's password as `"<REDACTED:…>"`.
 
+## The EdgeConnect toolkit
+
+Three repositories that work together:
+
+| Repository | What it does | Agent skill |
+|---|---|---|
+| [edgeconnect-orchestrator-automation](https://github.com/Crypto-Gi/edgeconnect-orchestrator-automation) | `edgeconnect-auto` CLI: deploys and removes firewall policies, zones, address, service and application groups, application definitions and template-group ACLs from reviewed CSVs, with a dry run, a typed `APPLY` and readback verification. | `managing-edgeconnect-firewall-and-objects` |
+| [edgeconnect-preconfig](https://github.com/Crypto-Gi/edgeconnect-preconfig) | Turns an existing appliance into a Jinja2 + CSV preconfiguration template, then renders, validates and uploads one preconfig per site. | `building-edgeconnect-preconfig-templates` |
+| [edgeconnect-mcp](https://github.com/Crypto-Gi/edgeconnect-mcp) (this repository) | MCP server that lets Claude or any MCP client read, and with your approval change, an Orchestrator through its REST API. | `edgeconnect-guide` |
+
+**Install the CLI, the preconfig scripts and their two skills** (macOS and Linux; needs git, Python 3.9 or later and, for the skills, Node.js 18 or later):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/main/setup.sh)
+```
+
+The same `setup.sh` is in all three repositories. It asks for an install folder (default `~/edgeconnect`) and whether the skills go in your home folder, for every project, or only inside that folder; the skills installer then asks which agents get them. Everything lands in the one folder: both repositories from `main`, a Python environment and one shared `.env`, plus `edgeconnect-auto` and `edgeconnect-preconfig` commands in `~/.local/bin`. Run it again to update: anything already installed is reported and kept, and only what is missing is added. Options: `--dir PATH`, `--skills home|folder`, `--agents claude-code,codex`, `--refresh-skills`, `--yes`. The skills installer may offer its own `find-skills` skill once; answer No unless you want it.
+
+`setup.sh` installs the other two repositories and their skills. It does not install this MCP server or its guide skill; [Install](#install) below covers those.
+
 ## Install
 
 You need Python 3.9 or later (Linux, macOS or Windows) and an Orchestrator REST API key. HPE's [API Key](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/orchestrator/server/api-key/) page shows how to create one; give it Read-Only permission unless you plan to turn writes on. The `npx` commands need Node.js 18 or later.
