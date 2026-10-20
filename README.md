@@ -7,10 +7,6 @@
 
 **Let Claude, or any other MCP client, read and safely change an HPE Aruba EdgeConnect SD-WAN Orchestrator through its REST API.**
 
-![Claude Code answers three questions through edgeconnect-mcp: which appliances are unreachable, a report on flows for the last 24 hours, and all YouTube traffic flows, listing the API calls it made for each](docs/demo.gif)
-
-<sub>A real Claude Code session against Orchestrator 9.7.1 through edgeconnect-mcp v0.2.1, reads only. Claude's answers are shown as given.</sub>
-
 You ask in plain language ("which appliances on the lab are unreachable?") instead of clicking through the Orchestrator UI or hand-writing REST calls. The assistant finds the right one of the Orchestrator's ~1,200 API operations and calls it. MCP (Model Context Protocol) is the standard way AI assistants call external tools; this server gives them five generic tools that cover the whole REST API on 9.7 / 10.0, by reading the API spec the Orchestrator itself serves.
 
 - **Read-only unless you opt in**, per Orchestrator, with a blocklist of high-risk writes on top, and every write needs a second, confirmed call.
