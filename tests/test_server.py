@@ -156,6 +156,20 @@ class McpServerTest(unittest.TestCase):
         server = Server.from_dotenv(str(dotenv))
         self.assertEqual({name: o.confirm_writes for name, o in server.orchestrators.items()}, {"a": True, "b": False})
 
+    def test_main_falls_back_to_home_settings_file(self):
+        from unittest import mock
+        import edgeconnect_mcp.server as server_module
+        home = Path(self.tmp.name) / "home.env"
+        home.write_text("x=1\n")
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            with mock.patch.object(server_module, "HOME_DOTENV", home), mock.patch.object(Server, "from_dotenv", side_effect=OSError("stop")) as from_dotenv, mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(server_module.main([]), 2)
+        finally:
+            os.chdir(cwd)
+        from_dotenv.assert_called_once_with(str(home))
+
     def test_secret_tokens_round_trip_on_write_back(self):
         self.lab_client.body = json.dumps({"name": "g", "presharedKey": "hunter2", "nested": [{"password": "p@ss"}]}).encode()
         _, text = self.call("api_get", orchestrator="lab", path="/ipObjects/addressGroup")

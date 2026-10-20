@@ -620,14 +620,18 @@ def _error(identifier: Any, code: int, message: str, data: Any = None) -> Dict[s
     return {"jsonrpc": "2.0", "id": identifier, "error": error}
 
 
+# One settings file for every install route (the Claude Code plugin reads it too).
+HOME_DOTENV = Path.home() / ".edgeconnect-mcp" / ".env"
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="edgeconnect-mcp", description="MCP server for EdgeConnect Orchestrator (stdio, or local HTTP with --http)")
-    parser.add_argument("--dotenv", default=os.environ.get("EDGECONNECT_DOTENV"), help="path to the .env file (default: $EDGECONNECT_DOTENV or ./.env)")
+    parser.add_argument("--dotenv", default=os.environ.get("EDGECONNECT_DOTENV"), help="path to the .env file (default: $EDGECONNECT_DOTENV, else ./.env, else ~/.edgeconnect-mcp/.env)")
     parser.add_argument("--list-high-risk", metavar="NICKNAME", help="print every write operation in that Orchestrator's spec that the high-risk blocklist refuses, then exit")
     parser.add_argument("--http", type=int, metavar="PORT", help="serve MCP over HTTP on 127.0.0.1:PORT instead of stdio (needs mcp_http_token in .env; put an HTTPS proxy in front for remote clients)")
     args = parser.parse_args(argv)
     try:
-        dotenv = args.dotenv or (".env" if Path(".env").is_file() else None)
+        dotenv = args.dotenv or next((str(path) for path in (Path(".env"), HOME_DOTENV) if path.is_file()), None)
         server = Server.from_dotenv(dotenv)
         if args.list_high_risk:
             orchestrator = server._orchestrator({"orchestrator": args.list_high_risk})
