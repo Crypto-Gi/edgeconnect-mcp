@@ -1,4 +1,4 @@
-# Every operation the edgeconnect-guide skill names. Each one returned a passing result between 2026-10-16 and 2026-10-18 on Orchestrator 9.7.1.42046
+# Every operation the edgeconnect-guide skill names. Each one returned a passing result between 2026-10-16 and 2026-10-20 on Orchestrator 9.7.1.42046
 # (a lab with ECOS 9.6.2.1 appliances, and a single-appliance production network on ECOS 9.6.4.0 using test objects only); some reads also on Orchestrator 10.0.0.
 # scripts/check_links.py fails when a card or playbook names an operation that is not listed here.
 method	path
@@ -219,6 +219,7 @@ GET	/stats/aggregate/availability/tunnel
 GET	/stats/aggregate/boost
 GET	/stats/aggregate/dns
 GET	/stats/aggregate/dscp
+GET	/stats/aggregate/flow
 POST	/stats/aggregate/flow/active
 POST	/stats/aggregate/interface
 GET	/stats/aggregate/securityPolicy

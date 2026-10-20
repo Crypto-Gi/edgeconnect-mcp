@@ -151,7 +151,7 @@ claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeco
 - **Cards:** for each feature, a card with the official doc pages, a few key facts and the operations that touch it.
 - **Playbooks:** for common jobs, such as adding a BGP neighbor or a segment, a playbook that reads current state before writing and says how to roll back.
 
-The playbooks are for reference only. Every operation the skill names passed in a real run on Orchestrator 9.7.1 between 2026-10-16 and 2026-10-18 (listed in `tested-operations.tsv`). Steps that could not be tested were left out, or point to the Orchestrator UI.
+The playbooks are for reference only. Every operation the skill names passed in a real run on Orchestrator 9.7.1 between 2026-10-16 and 2026-10-20 (listed in `tested-operations.tsv`). Steps that could not be tested were left out, or point to the Orchestrator UI.
 
 ### Add the guide skill
 

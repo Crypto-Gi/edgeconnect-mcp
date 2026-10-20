@@ -28,7 +28,7 @@ Looking at live and recent traffic flows, and pulling statistics (real-time, tim
 ## MCP operations
 - Find with `find_operations` terms "flow", "stats/timeseries", "stats/aggregate", "realtimeStats".
 - Flows: `GET /flow` (needs `nePk`, `maxFlows`; many filters such as `ip1`, `port1`, `application`, `zone1`, `filter`, `uptime`), `GET /flow/flowDetails2` (needs `nePk`, `id`, `seq`), `GET /flow/flowBandwidthStats` (needs `nePk`, `id`, `seq`), `GET /flow/flowOptimization` (needs `nePk`, `id`, `seq`, `ignore`) shows optimisation action, warnings and errors for one flow.
-- Flow counts and series: `POST /stats/aggregate/flow/active` (body `nePks`), `GET /stats/timeseries/flow` (needs `startTime`, `endTime`, `granularity`, `trafficType`, `flowType`; `nePk` or `groupPk`), `GET /stats/timeseries/appliance` (needs `startTime`, `endTime`, `granularity`, `trafficType`).
+- Flow counts and series: `GET /stats/aggregate/flow` (needs `nePk`, `startTime`, `endTime`, `granularity`; times in seconds, see Gotchas), `POST /stats/aggregate/flow/active` (body `nePks`), `GET /stats/timeseries/flow` (needs `startTime`, `endTime`, `granularity`, `trafficType`, `flowType`; `nePk` or `groupPk`), `GET /stats/timeseries/appliance` (needs `startTime`, `endTime`, `granularity`, `trafficType`).
 - Interface utilisation: `POST /stats/aggregate/interface` (needs `startTime`, `endTime`, `granularity`; body `nePks`; optional `trafficType`, `format`).
 - Real-time: `POST /realtimeStats` (needs `nePk`; body `type`, `name`, `filter`). Types that return data: `trafficType` (name "0"), `drops` (name ""), `interface` (name "wan0", filter "0").
 - Collection and retention: `GET /gms/stats/collection`, `PUT /gms/stats/collection` (needs `statType`, `isEnabled`; refused on container-mode Orchestrators with "Not available in Container Mode"), `GET /gms/stats/retention`, `GET /gms/stats/approximateDiskSpace` (needs `applianceCount`), `GET /appliance/statsConfig` (no required parameters).
@@ -37,6 +37,9 @@ Looking at live and recent traffic flows, and pulling statistics (real-time, tim
 ## Gotchas
 - Stats reads can be large; pass `max_chars`, narrow `nePk`, time range and granularity, and avoid looping over the whole fleet.
 - `GET /flow` is proxied to the appliance and limited by `maxFlows`; filter instead of raising the cap.
+- `GET /stats/aggregate/flow` takes `startTime` and `endTime` in epoch seconds, although the spec says milliseconds: millisecond values return an empty `result` with no error (Orchestrator 9.7.1, tested 2026-10-20).
+- `GET /flow` `uptime`: `anytime` and `last…` values return only active flows, while `term…` values and no `uptime` at all return only ended flows. For "all flows in the last 24 hours", call it twice (`last24hr` and `term24hr`) and add the results; a single `anytime` call can wrongly report zero (ECOS 9.6.4.0, tested 2026-10-20).
+- `GET /flow` `application` also accepts DPI application names that are not in the spec's list, such as `youtube`, matched without regard to case (ECOS 9.6.4.0, tested 2026-10-20).
 - If every stats call returns 500, the Orchestrator's stats database is the problem; on a healthy Orchestrator the stats calls above all work.
 - Disabling a statistic loses data from the charts; confirm first.
 ## Related

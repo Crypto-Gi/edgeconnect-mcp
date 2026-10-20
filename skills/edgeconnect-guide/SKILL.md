@@ -5,7 +5,7 @@ description: Use with the edgeconnect-mcp tools for any HPE Aruba EdgeConnect SD
 
 # EdgeConnect guide
 
-> **Reference only.** Every MCP operation this guide names returned a passing result on Orchestrator 9.7.1 (ECOS 9.6.2.1 lab appliances and an ECOS 9.6.4.0 production appliance, test objects only) between 2026-10-16 and 2026-10-18; the full list is [tested-operations.tsv](tested-operations.tsv). Anything not tested was left out. Your version and configuration can behave differently, so read first, show the change, get a yes and verify every write.
+> **Reference only.** Every MCP operation this guide names returned a passing result on Orchestrator 9.7.1 (ECOS 9.6.2.1 lab appliances and an ECOS 9.6.4.0 production appliance, test objects only) between 2026-10-16 and 2026-10-20; the full list is [tested-operations.tsv](tested-operations.tsv). Anything not tested was left out. Your version and configuration can behave differently, so read first, show the change, get a yes and verify every write.
 
 ## When to use
 
