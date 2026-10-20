@@ -1,10 +1,13 @@
 # edgeconnect-mcp
 
+[![test](https://github.com/Crypto-Gi/edgeconnect-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/Crypto-Gi/edgeconnect-mcp/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/Crypto-Gi/edgeconnect-mcp)](https://github.com/Crypto-Gi/edgeconnect-mcp/releases)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![python](https://img.shields.io/badge/python-3.9%2B-blue)](pyproject.toml)
+
 **Let Claude, or any other MCP client, read and safely change an HPE Aruba EdgeConnect SD-WAN Orchestrator through its REST API.**
 
-> **Independent open-source project.** Not made, endorsed or supported by Hewlett Packard Enterprise. Provided "as is" under the [Apache License 2.0](LICENSE), without warranty or liability; you are responsible for what you, or an assistant you connect, change on your network. See [NOTICE](NOTICE).
-
-MCP (Model Context Protocol) is the standard way AI assistants call external tools. This server gives an assistant five generic tools that cover the Orchestrator's whole REST API, about 1,200 operations on 9.7 / 10.0, by reading the API spec the Orchestrator itself serves. You ask in plain language ("which appliances on the lab are unreachable?") and the assistant finds the right operation and calls it.
+You ask in plain language ("which appliances on the lab are unreachable?") instead of clicking through the Orchestrator UI or hand-writing REST calls. The assistant finds the right one of the Orchestrator's ~1,200 API operations and calls it. MCP (Model Context Protocol) is the standard way AI assistants call external tools; this server gives them five generic tools that cover the whole REST API on 9.7 / 10.0, by reading the API spec the Orchestrator itself serves.
 
 - **Read-only unless you opt in**, per Orchestrator, with a blocklist of high-risk writes on top, and every write needs a second, confirmed call.
 - **Secrets never reach the assistant.** Keys, passwords, PSKs and SNMP community strings come back redacted and are restored only when written back to where they came from.
@@ -12,8 +15,50 @@ MCP (Model Context Protocol) is the standard way AI assistants call external too
 - **No dependencies.** Pure Python 3.9+ standard library. Runs over stdio, locally, over SSH or in a container, or as an HTTP endpoint behind an HTTPS proxy.
 - **Current MCP spec.** Speaks MCP 2026-07-28 (stateless, `server/discover`) and still answers older clients that open with `initialize` (2025-11-25 back to 2024-11-05).
 - **Comes with a guide skill** that tells the assistant which official docs and tested operations to use for each feature.
+- **Tested on a real Orchestrator.** Run end to end against Orchestrator 9.7.1 with five EC-V appliances (ECOS 9.6 and 9.7), including two-step writes, the audit outputs and HTTPS through Caddy and Nginx Proxy Manager.
+
+> Independent project, not affiliated with or supported by HPE. Provided as is, without warranty: you are responsible for every change made through it, by you or by an assistant you connect. See [NOTICE](NOTICE).
 
 It reads the same `.env` format as [edgeconnect-orchestrator-automation](https://github.com/Crypto-Gi/edgeconnect-orchestrator-automation), so one `.env` can serve both. For bulk firewall and object changes, use that project's CSV workflows instead: they add drift checks, readback and rollback that raw `api_write` calls do not.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `list_orchestrators` | Configured nicknames, host, and whether writes are enabled. Never shows keys. |
+| `find_operations` | Keyword search over the Orchestrator's own API spec. |
+| `describe_operation` | Parameters and request-body schema for one operation. |
+| `api_get` | Any documented GET. |
+| `api_write` | Any documented POST, PUT, PATCH or DELETE, only on Orchestrators with writes enabled. |
+
+Paths are relative to `/gms/rest`, for example `/appliance` or `/gms/versions`. Responses are truncated to `max_chars` (default 60,000) so one call cannot flood the conversation.
+
+## What a write looks like
+
+With writes enabled, the first `api_write` call changes nothing. This is the server's reply, copied from the 2026-10-19 run on the 9.7.1 lab (only the Orchestrator nickname is changed):
+
+```json
+{
+  "status": "confirmation_required",
+  "confirmation": "dde95bf9cb793cbf",
+  "expires_in_seconds": 600,
+  "change": {
+    "method": "POST",
+    "path": "/ipObjects/addressGroup",
+    "query": null,
+    "body": {
+      "name": "ztest_ag_live",
+      "type": "AG",
+      "rules": [{"includedIPs": ["198.51.100.0/24"], "excludedIPs": [], "includedGroups": [], "comment": "ztest live two-step"}]
+    },
+    "orchestrator": "lab",
+    "operation": "Create or update an ACL address group"
+  },
+  "next": "Nothing was sent. Show the user this exact change. Only after they approve, call api_write again with the same orchestrator, method, path, query and body, plus confirmation set to this code. Any difference needs a new code."
+}
+```
+
+The assistant shows you that change. Only after your yes does it repeat the call with the code, and only then does the Orchestrator receive it. Reads come back with secrets already replaced: in the same run, `GET /appliance` returned each appliance's password as `"<REDACTED:…>"`.
 
 ## Choose what to install
 
@@ -25,7 +70,7 @@ It reads the same `.env` format as [edgeconnect-orchestrator-automation](https:/
 
 Everything installs straight from this GitHub repository, pinned to release `v0.2.1`, so a later change to the repository never reaches you until you change the version in the command. New versions are listed under [Releases](https://github.com/Crypto-Gi/edgeconnect-mcp/releases).
 
-**Requirements:** Python 3.9 or later for the server, on Linux, macOS or Windows. Node.js 18+ for the `npx` commands; uv, pipx or Docker only for those routes. You also need an Orchestrator REST API key.
+**Requirements:** Python 3.9 or later for the server, on Linux, macOS or Windows. Node.js 18+ for the `npx` commands; uv, pipx or Docker only for those routes. You also need an Orchestrator REST API key: HPE's [API Key](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/orchestrator/server/api-key/) page shows how to create one. Give it Read-Only permission unless you plan to turn writes on.
 
 ## Quick start (Claude Code)
 
@@ -54,7 +99,14 @@ Everything installs straight from this GitHub repository, pinned to release `v0.
 
    Inside Claude Code the same is `/plugin marketplace add Crypto-Gi/edgeconnect-mcp#v0.2.1`, then `/plugin install edgeconnect@edgeconnect-mcp`.
 
-4. Restart Claude Code and ask: "list my EdgeConnect orchestrators", then "show the appliances on lab".
+4. Restart Claude Code and ask: "list my EdgeConnect orchestrators", then "show the appliances on lab". The first question calls `list_orchestrators`, which needs no network and should return this for the settings above:
+
+   ```json
+   [{"name": "lab", "host": "192.0.2.10", "writes_enabled": false, "passthrough_writes_enabled": false,
+     "write_confirmation": true, "high_risk_allowed": [], "default": true}]
+   ```
+
+   The second one reaches the Orchestrator, so a wrong address, key or certificate shows up there.
 
 ## Install the server
 
@@ -87,18 +139,6 @@ claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeco
 ```
 
 [docs/clients.md](docs/clients.md) has the config for Claude Desktop, Codex, OpenCode, VS Code, Cursor, Windsurf and Devin. To run the server on another machine or behind an HTTPS proxy, see [Remote access](#remote-access).
-
-## Tools
-
-| Tool | What it does |
-|---|---|
-| `list_orchestrators` | Configured nicknames, host, and whether writes are enabled. Never shows keys. |
-| `find_operations` | Keyword search over the Orchestrator's own API spec. |
-| `describe_operation` | Parameters and request-body schema for one operation. |
-| `api_get` | Any documented GET. |
-| `api_write` | Any documented POST, PUT, PATCH or DELETE, only on Orchestrators with writes enabled. |
-
-Paths are relative to `/gms/rest`, for example `/appliance` or `/gms/versions`. Responses are truncated to `max_chars` (default 60,000) so one call cannot flood the conversation.
 
 ## Guide skill
 
@@ -152,7 +192,12 @@ python3 skills/edgeconnect-guide/scripts/check_links.py --inventory <inventory>/
 - **High-risk blocklist.** Even with writes on, whole categories of dangerous writes are refused. See [below](#high-risk-blocklist).
 - **Secret redaction.** API keys are only sent as the `X-Auth-Token` header, and secrets in responses are replaced with restorable tokens. See [below](#secret-redaction).
 - **Rate limits per Orchestrator.** Reads default to 10 per second and writes to 2 per second, each with a burst of twice that. Over the limit, calls wait rather than fail, so scripts slow down instead of breaking.
-- **Audit trail.** Every tool call is appended as one JSON line to `~/.edgeconnect-mcp/audit.jsonl` (file 0600, folder 0700): UTC timestamp and weekday, session and call id, client address, tool, Orchestrator, method, path, what the operation does (its API summary), for writes the step (`awaiting_confirmation`, `confirmed` or `executed`) and the request body, redacted query, outcome, error, duration and response size. Secrets never reach it: bodies hold `<REDACTED:…>` tokens, and anything typed in clear under a secret-named key is masked. Optionally the same records also go to a syslog server (`mcp_audit_syslog`) and a SQLite database (`mcp_audit_sqlite`). In HTTP mode, requests turned away for a wrong token, client address or origin are logged too (`tool` is `http_refused`, with the client address, the proxy it came through as `peer`, and the reason, such as `missing access token` or `wrong access token`; never the token). Every write is also logged to stderr (the MCP client's server log).
+- **Audit trail.** Every tool call is appended as one JSON line to `~/.edgeconnect-mcp/audit.jsonl` (file 0600, folder 0700).
+  - Each record has the UTC timestamp and weekday, session and call id, client address, tool, Orchestrator, method, path, what the operation does (its API summary), redacted query, outcome, error, duration and response size. Writes also record the step (`awaiting_confirmation`, `confirmed` or `executed`) and the request body.
+  - Secrets never reach it: bodies hold `<REDACTED:…>` tokens, and anything typed in clear under a secret-named key is masked.
+  - Optionally the same records also go to a syslog server (`mcp_audit_syslog`) and a SQLite database (`mcp_audit_sqlite`).
+  - In HTTP mode, requests turned away for a wrong token, client address or origin are logged too (`tool` is `http_refused`, with the client address, the proxy it came through as `peer`, and the reason, such as `missing access token` or `wrong access token`; never the token).
+  - Every write is also logged to stderr (the MCP client's server log).
 - **Untrusted results.** API results carry a note that their text is data, not instructions, and the server instructions say the same. Invisible and direction-changing characters (zero-width, bidi overrides, Unicode tag characters) are shown as `\uXXXX` JSON escapes, so hidden text is visible while the value still decodes exactly.
 - **Strict TLS.** Certificates are verified and redirects are refused, so the API key can't follow a redirect to another host or to plain HTTP. A self-signed lab Orchestrator is supported by pinning its certificate (`<nickname>_tls_sha256`) or trusting a private CA (`<nickname>_ca_bundle`), never by turning verification off.
 - **No network listener by default.** The server uses stdio unless you pass `--http`. HTTP listens on 127.0.0.1 unless `mcp_http_listen` says otherwise (the container image sets 0.0.0.0). Every request needs the token and is checked against the address allowlist on its own; requests run in parallel, up to 8 at once, and more get a 503 to retry.
@@ -245,15 +290,7 @@ Plain HTTP never crosses the network. [docs/remote-access.md](docs/remote-access
 
 ## Orchestrator API notes
 
-Found while driving a 9.7.1 Orchestrator with five ECOS 9.6/9.7 appliances through this server:
-
-- Operations whose spec accepts only `text/plain` (Zscaler countries/timezones) take a plain string `body`, which `api_write` sends raw; a JSON-accepting operation gets it JSON-encoded.
-- Deployment, BGP, OSPF, VRRP, static routes and IP SLA have no Orchestrator write operation in the 9.7.1 spec. Read the appliance's own config with `GET /appliance/rest?nePk=<NE>&url=<path>` (`deployment`, `subnets3/configured`, `bgp/config/neighbor`, `ospf/config/system`, `vrrp`, `ipsla/config/managers`), All of these reads are tested. As a write, posting the whole object back with `POST /appliance/rest` has been tested only for `bgp/config/neighbor`; check a deployment change with `POST /deployment/validate` and make it in the Orchestrator UI. `subnets/configured` returns 410; use `subnets3/configured`.
-- Overlay `PUT /gms/overlays/config` is refused with 400 unless `multiCrossConnect` only names labels in the primary or backup list. On 9.7.1 a full-object post reads back equal; only partial bodies read back different, so compare intent fields. `topologyType` 1 is mesh and 2 is hub-and-spoke.
-- `GET /gms/overlays/config/regions`: always pass both `overlayId` and `regionId` (one 9.7.1 Orchestrator accepted no parameters, another refused that with 400).
-- User-defined applications are read with `GET /applicationDefinition?...&resourceKey=userDefined`; without it the call returns 200 with `{"result":"Not found"}`.
-- LAN subnets in a non-default segment are not advertised until that VRF is added with `add_local_lan` via `POST /subnets/setSubnetSharingOptions`.
-- Zone names allow only letters, digits and `_`. Zones and segment security policies are whole-collection writes: read, add, write back.
+Quirks found while driving a 9.7.1 Orchestrator through this server, such as which features have no Orchestrator write operation and which writes replace a whole collection, are in [docs/api-notes.md](docs/api-notes.md).
 
 ## Development
 
@@ -264,6 +301,10 @@ Run the tests from the repository root (they use only the standard library):
 ```
 
 The tests read `./.env` if one exists, so move your real `.env` out of the repository root first, or the run fails on its Orchestrators.
+
+## Contributing
+
+Bug reports, Orchestrator API quirks and fixes are welcome: open an [issue](https://github.com/Crypto-Gi/edgeconnect-mcp/issues), or see [CONTRIBUTING.md](CONTRIBUTING.md) before sending a pull request.
 
 ## License
 
