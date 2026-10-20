@@ -1,6 +1,6 @@
 # Connect an MCP client
 
-Every client starts the same command, and the server reads `~/.edgeconnect-mcp/.env` (see [Install](../README.md#install)). Any command from [Other ways to install](install.md) works in its place.
+Every client starts the same command, and the server reads `~/.edgeconnect-mcp/.env` (see [Install](../README.md#install)). Any server command from the [install guide](install.md) works in its place.
 
 ```text
 npx -y github:Crypto-Gi/edgeconnect-mcp

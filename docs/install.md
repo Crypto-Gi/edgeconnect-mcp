@@ -1,31 +1,97 @@
-# Other ways to install
+# Install guide
 
-The [README](../README.md#install) covers the usual setup: a settings file at `~/.edgeconnect-mcp/.env`, then the Claude Code plugin or `npx`. This page has the alternatives.
+edgeconnect-mcp has two parts. Install both:
 
-## Where the server finds its settings
+- **The server** gives your assistant the tools to talk to your Orchestrator.
+- **The guide skill** tells your assistant how to use those tools well: which docs to read, which operations were tested, how to roll back.
 
-It reads the first of these that is set or exists:
+## Pick your route
 
-1. `--dotenv /absolute/path/.env`
-2. the `EDGECONNECT_DOTENV` environment variable
-3. `~/.edgeconnect-mcp/.env` (on Windows, `%USERPROFILE%\.edgeconnect-mcp\.env`)
-4. `./.env` in the folder the server is started in
+| You use | Do this | Server needs |
+|---|---|---|
+| Claude Code | [Claude Code plugin](#claude-code-plugin): one command installs both parts | Python 3.9+ |
+| Any other client, or Claude Code without the plugin | [npx](#npx) | Python 3.9+ and Node.js 18+ |
+| No Node.js | [uvx, pipx or a clone](#uvx-pipx-or-a-clone) | Python 3.9+ and uv or pipx |
+| Docker | [Docker](#docker) | Docker |
 
-Process environment variables override the file, so `docker run --env-file` style setups work too.
+Every route except Docker reads the same settings file, so do step 0 first.
 
-## Other server commands
+## Step 0: create your settings file (once)
 
-Each of these runs the same server as `npx -y github:Crypto-Gi/edgeconnect-mcp`. Use whichever tool you already have.
+```bash
+curl -fsSL --create-dirs -o ~/.edgeconnect-mcp/.env https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/main/.env.example
+chmod 600 ~/.edgeconnect-mcp/.env
+```
 
-| Route | Command |
+Open `~/.edgeconnect-mcp/.env` and fill in your Orchestrator:
+
+```dotenv
+orch_1=lab
+lab_base_url=https://<ORCHESTRATOR_FQDN_OR_IP>
+lab_api_key=<API_KEY>
+```
+
+HPE's [API Key](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/orchestrator/server/api-key/) page shows how to create the key. Give it Read-Only permission unless you plan to turn writes on. On Windows, save [.env.example](../.env.example) as `%USERPROFILE%\.edgeconnect-mcp\.env` instead.
+
+## Claude Code plugin
+
+**Step 1.** Install the plugin. It brings the server and the guide skill:
+
+```bash
+claude plugin marketplace add Crypto-Gi/edgeconnect-mcp && claude plugin install edgeconnect@edgeconnect-mcp
+```
+
+**Step 2.** Restart Claude Code and [check it works](#check-it-works).
+
+To update later:
+
+```bash
+claude plugin marketplace update edgeconnect-mcp && claude plugin update edgeconnect@edgeconnect-mcp
+```
+
+## npx
+
+The server command is `npx -y github:Crypto-Gi/edgeconnect-mcp`. It needs nothing else from you, because the server finds `~/.edgeconnect-mcp/.env` by itself.
+
+**Step 1.** Add the server to your client:
+
+| Client | Run this |
+|---|---|
+| Claude Code | `claude mcp add --scope user edgeconnect -- npx -y github:Crypto-Gi/edgeconnect-mcp` |
+| Codex | `codex mcp add edgeconnect -- npx -y github:Crypto-Gi/edgeconnect-mcp` |
+| Claude Desktop, OpenCode, VS Code, Cursor, Windsurf, Devin | Paste the config from [clients.md](clients.md) |
+
+`--scope user` makes the server available in every Claude Code project, not just the current folder.
+
+**Step 2.** Add the guide skill for the same agent:
+
+| Agent | Run this |
+|---|---|
+| Claude Code | `npx skills add Crypto-Gi/edgeconnect-mcp -g -a claude-code -y` |
+| Codex | `npx skills add Crypto-Gi/edgeconnect-mcp -g -a codex -y` |
+| Any other, or several at once | `npx skills add Crypto-Gi/edgeconnect-mcp` (asks which agents) |
+
+`-g` installs it for your user, so every project sees it. Leave `-g` out to install it in the current project only. More options are under [Guide skill](#guide-skill).
+
+**Step 3.** Restart your client and [check it works](#check-it-works).
+
+## uvx, pipx or a clone
+
+These run the same server without Node.js. Use the [npx](#npx) steps, but in step 1 replace `npx -y github:Crypto-Gi/edgeconnect-mcp` with one of these:
+
+| Tool | Server command |
 |---|---|
 | uvx | `uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp edgeconnect-mcp` |
-| pipx | `pipx install git+https://github.com/Crypto-Gi/edgeconnect-mcp`, then `edgeconnect-mcp` |
-| Docker | `docker build -t edgeconnect-mcp https://github.com/Crypto-Gi/edgeconnect-mcp.git`, then `docker run -i --rm --env-file /absolute/path/.env edgeconnect-mcp` |
+| pipx | run `pipx install git+https://github.com/Crypto-Gi/edgeconnect-mcp` once; the command is then `edgeconnect-mcp` |
+| A clone | set it up as below; the command is then `/absolute/path/to/edgeconnect-mcp/.venv/bin/edgeconnect-mcp` |
 
-The npx route looks for `python3` (or `python`) on `PATH`; set `EDGECONNECT_PYTHON` to use another interpreter. The Docker image doesn't see your home folder, so it takes its settings from `--env-file`.
+For example, uvx in Claude Code:
 
-Or clone and install into a virtual environment. Upgrading pip matters on macOS's built-in Python 3.9, whose pip is too old for editable installs:
+```bash
+claude mcp add --scope user edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp edgeconnect-mcp
+```
+
+To set up a clone. Upgrading pip matters on macOS's built-in Python 3.9, whose pip is too old for editable installs:
 
 ```bash
 git clone https://github.com/Crypto-Gi/edgeconnect-mcp.git
@@ -35,28 +101,100 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 ```
 
-To run the server on another machine or behind an HTTPS proxy, see [Remote access](remote-access.md).
+The guide skill (step 2) still installs with `npx skills add`. Without Node.js, copy it [by hand](#guide-skill).
 
-## Pin a release
+## Docker
 
-The usual commands follow `main`. To stay on one release, add its tag from [Releases](https://github.com/Crypto-Gi/edgeconnect-mcp/releases), shown here as `<tag>`:
+A container doesn't see your home folder, so Docker takes its settings from a `.env` file you point it at. Pick one of two ways.
 
-| Install | Pinned form |
-|---|---|
-| Claude Code plugin | `claude plugin marketplace add 'Crypto-Gi/edgeconnect-mcp#<tag>'` |
-| npx | `npx -y github:Crypto-Gi/edgeconnect-mcp#<tag>` |
-| uvx | `uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@<tag> edgeconnect-mcp` |
-| Guide skill | `npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#<tag>` |
-| Settings template | `https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/<tag>/.env.example` |
+### A. The client starts a container each time
 
-## Guide skill options
-
-`npx skills add Crypto-Gi/edgeconnect-mcp` uses the open [`skills`](https://github.com/vercel-labs/skills) installer, which supports Claude Code, Codex, OpenCode, GitHub Copilot (VS Code), Cursor, Windsurf, Devin for Terminal and about 50 more. To skip its questions:
+**Step 1.** Build the image:
 
 ```bash
-npx skills add Crypto-Gi/edgeconnect-mcp -a codex opencode -y        # name the agents, this project only
-npx skills add Crypto-Gi/edgeconnect-mcp -g -a claude-code -y        # -g: for your user, every project
+docker build -t edgeconnect-mcp https://github.com/Crypto-Gi/edgeconnect-mcp.git
 ```
+
+**Step 2.** Add it to your client. The server command is `docker run -i --rm --env-file /absolute/path/.env edgeconnect-mcp`, for example:
+
+```bash
+claude mcp add --scope user edgeconnect -- docker run -i --rm --env-file /absolute/path/.env edgeconnect-mcp
+```
+
+**Step 3.** Add the guide skill (as in [npx](#npx) step 2), restart your client, and [check it works](#check-it-works).
+
+### B. One container that keeps running
+
+This keeps one server running in HTTP mode, and every client on the machine connects to it through `docker exec`. No client needs the HTTP token.
+
+**Step 1.** Clone the repository and fill in its `.env`:
+
+```bash
+git clone https://github.com/Crypto-Gi/edgeconnect-mcp.git
+cd edgeconnect-mcp
+cp .env.example .env && chmod 600 .env
+```
+
+Besides your Orchestrator, HTTP mode needs `mcp_http_token` in this `.env`, at least 32 characters. Make one with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`.
+
+**Step 2.** Start the container:
+
+```bash
+docker compose up -d
+```
+
+`compose.yaml` names it `edgeconnect-mcp` and publishes port 8765 on this machine's 127.0.0.1 only.
+
+**Step 3.** Add it to your client. The server command is `docker exec -i edgeconnect-mcp python -m edgeconnect_mcp`:
+
+| Client | Run this |
+|---|---|
+| Claude Code | `claude mcp add --scope user edgeconnect -- docker exec -i edgeconnect-mcp python -m edgeconnect_mcp` |
+| Codex | `codex mcp add edgeconnect -- docker exec -i edgeconnect-mcp python -m edgeconnect_mcp` |
+| JSON-config clients | Use the shape from [clients.md](clients.md) with `"command": "docker"` and `"args": ["exec", "-i", "edgeconnect-mcp", "python", "-m", "edgeconnect_mcp"]` |
+
+**Step 4.** Add the guide skill (as in [npx](#npx) step 2), restart your client, and [check it works](#check-it-works).
+
+To use the HTTP endpoint from another machine, put an HTTPS proxy in front of it: see [Remote access](remote-access.md).
+
+## Check it works
+
+Ask your assistant "list my EdgeConnect orchestrators". That calls `list_orchestrators`, which needs no network, and should return this, with your address as `host`:
+
+```json
+[{"name": "lab", "host": "192.0.2.10", "writes_enabled": false, "passthrough_writes_enabled": false,
+  "write_confirmation": true, "high_risk_allowed": [], "default": true}]
+```
+
+Then ask "show the appliances on lab". That one reaches the Orchestrator, so a wrong address, key or certificate shows up there.
+
+If the first question fails:
+
+- `claude mcp list` (or `codex mcp list`) shows whether the client could start the server.
+- `Orchestrator base URL and API key are required` means the server found no settings. Check `~/.edgeconnect-mcp/.env` exists and has your three lines, or, for Docker, the `--env-file` path.
+- `needs Python 3.9 or later on PATH` comes from the npx route. Install Python, or set `EDGECONNECT_PYTHON` to the interpreter to use.
+
+## How the server finds its settings
+
+| How it runs | Settings come from |
+|---|---|
+| Plugin, npx, uvx, pipx, clone | The first of: `--dotenv /absolute/path/.env`, `$EDGECONNECT_DOTENV`, `~/.edgeconnect-mcp/.env`, `./.env` in the folder it starts in |
+| `docker run --env-file` | The file you pass with `--env-file` |
+| `docker compose` and `docker exec` | The `.env` next to `compose.yaml`, read when the container was created |
+
+So it doesn't matter which folder you're in when you start your assistant. Environment variables with the same names override the file.
+
+## Guide skill
+
+`npx skills add Crypto-Gi/edgeconnect-mcp` uses the open [`skills`](https://github.com/vercel-labs/skills) installer. It supports Claude Code, Codex, OpenCode, GitHub Copilot (VS Code), Cursor, Windsurf, Devin for Terminal and about 50 more. You can name several agents at once:
+
+```bash
+npx skills add Crypto-Gi/edgeconnect-mcp -g -a codex opencode cursor -y
+```
+
+To update it, run the same command again. It replaces the installed copy.
+
+Without the installer:
 
 - **claude.ai:** zip the folder from a clone, then upload it in Settings > Capabilities > Skills:
 
@@ -66,7 +204,15 @@ npx skills add Crypto-Gi/edgeconnect-mcp -g -a claude-code -y        # -g: for y
 
 - **By hand:** copy `skills/edgeconnect-guide` into the agent's skills folder, for example `~/.claude/skills/`.
 
-## Update
+## Pin a release
 
-- **Claude Code plugin:** `claude plugin marketplace update edgeconnect-mcp && claude plugin update edgeconnect@edgeconnect-mcp`. The plugin moves when a release raises its version.
-- **Guide skill:** run the same `npx skills add` command again; it replaces the installed copy.
+The commands above follow `main`, which only changes through pull requests that pass CI. To stay on one release, add its tag from [Releases](https://github.com/Crypto-Gi/edgeconnect-mcp/releases), shown here as `<tag>`:
+
+| Install | Pinned form |
+|---|---|
+| Claude Code plugin | `claude plugin marketplace add 'Crypto-Gi/edgeconnect-mcp#<tag>'` |
+| npx | `npx -y github:Crypto-Gi/edgeconnect-mcp#<tag>` |
+| uvx | `uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@<tag> edgeconnect-mcp` |
+| Guide skill | `npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#<tag>` |
+| Docker | `docker build -t edgeconnect-mcp https://github.com/Crypto-Gi/edgeconnect-mcp.git#<tag>` |
+| Settings template | `https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/<tag>/.env.example` |
