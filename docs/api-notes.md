@@ -9,3 +9,5 @@ Found while driving a 9.7.1 Orchestrator with five ECOS 9.6/9.7 appliances throu
 - User-defined applications are read with `GET /applicationDefinition?...&resourceKey=userDefined`; without it the call returns 200 with `{"result":"Not found"}`.
 - LAN subnets in a non-default segment are not advertised until that VRF is added with `add_local_lan` via `POST /subnets/setSubnetSharingOptions`.
 - Zone names allow only letters, digits and `_`. Zones and segment security policies are whole-collection writes: read, add, write back.
+- `GET /stats/aggregate/flow` wants `startTime` and `endTime` in epoch seconds; the spec says milliseconds, and millisecond values return an empty result with no error (tested 2026-10-20).
+- `GET /flow`: `uptime=anytime` or `last24hr` returns only active flows, and `term24hr` (or no `uptime`) only ended ones, so a count of all flows needs both calls. `application` also takes DPI names outside the spec's list, such as `youtube` (ECOS 9.6.4.0, tested 2026-10-20).
