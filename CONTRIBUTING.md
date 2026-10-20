@@ -19,7 +19,11 @@ For a security problem, don't post the details publicly: open an issue that only
 
 3. Keep the server dependency-free (standard library only, Python 3.9+).
 4. Document only what you have tested. If a change touches how the server talks to an Orchestrator, say in the pull request which Orchestrator version you ran it against; if you could not run it against one, say that instead.
-5. Guide skill changes: name only operations listed in `skills/edgeconnect-guide/tested-operations.tsv`, link official docs rather than copying them, and run `skills/edgeconnect-guide/scripts/check_links.py` (see the README).
+5. Guide skill changes: name only operations listed in `skills/edgeconnect-guide/tested-operations.tsv`, link official docs rather than copying them, and run `check_links.py`. It checks the cards' and playbooks' format, that every link is in a doc inventory, that every operation is in `tested-operations.tsv` and in an Orchestrator's API spec, and that every playbook carries the reference-only notice. `--http` also checks developer portal links; HPE techdocs refuse scripted requests, so those are not HTTP-checked:
+
+   ```bash
+   python3 skills/edgeconnect-guide/scripts/check_links.py --inventory <inventory>/*.tsv --spec <apiDocs.json> --http
+   ```
 
 CI runs the tests on Python 3.9 and 3.13 for every pull request, and both must pass before a merge.
 

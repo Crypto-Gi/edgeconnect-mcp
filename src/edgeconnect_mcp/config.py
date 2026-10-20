@@ -158,7 +158,7 @@ def load_config(
         api_key_header = configured_value("api_key_header")
         tls_sha256 = configured_value("tls_sha256")
     if not base_url or not api_key:
-        raise ConfigurationError("Orchestrator base URL and API key are required; provide them in ./.env, process environment variables, or --dotenv <path>")
+        raise ConfigurationError("Orchestrator base URL and API key are required; provide them in ~/.edgeconnect-mcp/.env, ./.env, process environment variables, or --dotenv <path>")
     parsed = urlsplit(base_url)
     if parsed.scheme not in ({"https"} if not allow_http else {"https", "http"}) or not parsed.netloc:
         raise ConfigurationError("base URL must be an absolute {} URL".format("HTTPS" if not allow_http else "HTTP(S)"))

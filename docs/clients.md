@@ -1,19 +1,19 @@
 # Connect an MCP client
 
-Every client starts the same command. The examples use `uvx`; any server command from [Install the server](../README.md#install-the-server) works in its place (`npx -y github:Crypto-Gi/edgeconnect-mcp#v0.2.2`, a pipx or venv `edgeconnect-mcp`, or `docker run -i --rm --env-file …`). Use absolute paths, because clients don't start servers in your project folder.
+Every client starts the same command, and the server reads `~/.edgeconnect-mcp/.env` (see [Install](../README.md#install)). Any command from [Other ways to install](install.md) works in its place.
 
 ```text
-uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2 edgeconnect-mcp --dotenv /absolute/path/.env
+npx -y github:Crypto-Gi/edgeconnect-mcp
 ```
 
 Claude Code, Codex and OpenCode were tested with this server. The VS Code, Cursor, Windsurf and Devin entries use each client's documented MCP config format, with the same command.
 
 ## Claude Code
 
-The [plugin](../README.md#quick-start-claude-code) installs the server and the guide skill together. To add only the server:
+The [plugin](../README.md#2-install) installs the server and the guide skill together. To add only the server:
 
 ```bash
-claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2 edgeconnect-mcp --dotenv /absolute/path/.env
+claude mcp add edgeconnect -- npx -y github:Crypto-Gi/edgeconnect-mcp
 ```
 
 ## Claude Desktop
@@ -24,8 +24,8 @@ In `claude_desktop_config.json`:
 {
   "mcpServers": {
     "edgeconnect": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2", "edgeconnect-mcp", "--dotenv", "/absolute/path/.env"]
+      "command": "npx",
+      "args": ["-y", "github:Crypto-Gi/edgeconnect-mcp"]
     }
   }
 }
@@ -34,7 +34,7 @@ In `claude_desktop_config.json`:
 ## Codex
 
 ```bash
-codex mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2 edgeconnect-mcp --dotenv /absolute/path/.env
+codex mcp add edgeconnect -- npx -y github:Crypto-Gi/edgeconnect-mcp
 codex mcp list
 ```
 
@@ -48,7 +48,7 @@ In `opencode.json` (project) or `~/.config/opencode/opencode.json`:
   "mcp": {
     "edgeconnect": {
       "type": "local",
-      "command": ["uvx", "--from", "git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2", "edgeconnect-mcp", "--dotenv", "/absolute/path/.env"],
+      "command": ["npx", "-y", "github:Crypto-Gi/edgeconnect-mcp"],
       "enabled": true
     }
   }
@@ -66,8 +66,8 @@ In `.vscode/mcp.json`:
   "servers": {
     "edgeconnect": {
       "type": "stdio",
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2", "edgeconnect-mcp", "--dotenv", "/absolute/path/.env"]
+      "command": "npx",
+      "args": ["-y", "github:Crypto-Gi/edgeconnect-mcp"]
     }
   }
 }
@@ -81,8 +81,8 @@ Cursor uses `~/.cursor/mcp.json` and Windsurf uses `~/.codeium/windsurf/mcp_conf
 {
   "mcpServers": {
     "edgeconnect": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2", "edgeconnect-mcp", "--dotenv", "/absolute/path/.env"]
+      "command": "npx",
+      "args": ["-y", "github:Crypto-Gi/edgeconnect-mcp"]
     }
   }
 }
