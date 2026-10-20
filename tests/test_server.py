@@ -156,11 +156,12 @@ class McpServerTest(unittest.TestCase):
         server = Server.from_dotenv(str(dotenv))
         self.assertEqual({name: o.confirm_writes for name, o in server.orchestrators.items()}, {"a": True, "b": False})
 
-    def test_main_falls_back_to_home_settings_file(self):
+    def test_main_prefers_home_settings_file_over_local_env(self):
         from unittest import mock
         import edgeconnect_mcp.server as server_module
         home = Path(self.tmp.name) / "home.env"
         home.write_text("x=1\n")
+        (Path(self.tmp.name) / ".env").write_text("x=2\n")
         cwd = os.getcwd()
         os.chdir(self.tmp.name)
         try:

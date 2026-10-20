@@ -64,85 +64,59 @@ With writes enabled, the first `api_write` call changes nothing. This is the ser
 
 The assistant shows you that change. Only after your yes does it repeat the call with the code, and only then does the Orchestrator receive it. Reads come back with secrets already replaced: in the same run, `GET /appliance` returned each appliance's password as `"<REDACTED:…>"`.
 
-## Choose what to install
+## Install
 
-| You want | Install |
-|---|---|
-| The MCP server and the guide skill in Claude Code | The [Claude Code plugin](#quick-start-claude-code): one install sets up both |
-| The MCP server only, for any client | One [server command](#install-the-server), then [connect your client](docs/clients.md) |
-| The guide skill in another agent (Codex, OpenCode, VS Code, Cursor, Windsurf, Devin and more) | [`npx skills add`](#add-the-guide-skill), plus the server above |
+You need Python 3.9 or later (Linux, macOS or Windows) and an Orchestrator REST API key. HPE's [API Key](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/orchestrator/server/api-key/) page shows how to create one; give it Read-Only permission unless you plan to turn writes on. The `npx` commands need Node.js 18 or later.
 
-Everything installs straight from this GitHub repository, pinned to release `v0.2.2`, so a later change to the repository never reaches you until you change the version in the command. New versions are listed under [Releases](https://github.com/Crypto-Gi/edgeconnect-mcp/releases).
-
-**Requirements:** Python 3.9 or later for the server, on Linux, macOS or Windows. Node.js 18+ for the `npx` commands; uv, pipx or Docker only for those routes. You also need an Orchestrator REST API key: HPE's [API Key](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/orchestrator/server/api-key/) page shows how to create one. Give it Read-Only permission unless you plan to turn writes on.
-
-## Quick start (Claude Code)
-
-1. Create your settings file and keep it private:
-
-   ```bash
-   mkdir -p ~/.edgeconnect-mcp
-   curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/v0.2.2/.env.example -o ~/.edgeconnect-mcp/.env
-   chmod 600 ~/.edgeconnect-mcp/.env
-   ```
-
-2. Fill in one Orchestrator (see [Configuration](#configuration) for the rest):
-
-   ```dotenv
-   orch_1=lab
-   lab_base_url=https://192.0.2.10
-   lab_api_key=<API_KEY>
-   ```
-
-3. Install the plugin. It runs the server with `python3` and reads `~/.edgeconnect-mcp/.env`:
-
-   ```bash
-   claude plugin marketplace add 'Crypto-Gi/edgeconnect-mcp#v0.2.2'
-   claude plugin install edgeconnect@edgeconnect-mcp
-   ```
-
-   Inside Claude Code the same is `/plugin marketplace add Crypto-Gi/edgeconnect-mcp#v0.2.2`, then `/plugin install edgeconnect@edgeconnect-mcp`.
-
-4. Restart Claude Code and ask: "list my EdgeConnect orchestrators", then "show the appliances on lab". The first question calls `list_orchestrators`, which needs no network and should return this for the settings above:
-
-   ```json
-   [{"name": "lab", "host": "192.0.2.10", "writes_enabled": false, "passthrough_writes_enabled": false,
-     "write_confirmation": true, "high_risk_allowed": [], "default": true}]
-   ```
-
-   The second one reaches the Orchestrator, so a wrong address, key or certificate shows up there.
-
-## Install the server
-
-Pick one. Each gives you the `edgeconnect-mcp` command; pass it `--dotenv /absolute/path/.env`, or set `EDGECONNECT_DOTENV`. Without either, it reads `./.env`. Process environment variables override the file, so `--env-file` style setups work too.
-
-| Route | Command |
-|---|---|
-| npx (runs the bundled Python server) | `npx -y github:Crypto-Gi/edgeconnect-mcp#v0.2.2 --dotenv /absolute/path/.env` |
-| uvx | `uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2 edgeconnect-mcp --dotenv /absolute/path/.env` |
-| pipx | `pipx install git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2` |
-| Docker | `docker build -t edgeconnect-mcp https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.2`, then `docker run -i --rm --env-file /absolute/path/.env edgeconnect-mcp` |
-
-Or clone and install into a virtual environment. Upgrading pip matters on macOS's built-in Python 3.9, whose pip is too old for editable installs:
+### 1. Add your Orchestrator
 
 ```bash
-git clone --branch v0.2.2 https://github.com/Crypto-Gi/edgeconnect-mcp.git
-cd edgeconnect-mcp
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e .
-cp .env.example .env && chmod 600 .env
+curl -fsSL --create-dirs -o ~/.edgeconnect-mcp/.env https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/main/.env.example
+chmod 600 ~/.edgeconnect-mcp/.env
 ```
 
-The npx route looks for `python3` (or `python`) on `PATH`; set `EDGECONNECT_PYTHON` to use another interpreter.
+Open `~/.edgeconnect-mcp/.env` and replace the two placeholders. That is all the server needs; the rest of the file is optional and explained in [Configuration](#configuration).
 
-Register the command with your client. For Claude Code:
+```dotenv
+orch_1=lab
+lab_base_url=https://<ORCHESTRATOR_FQDN_OR_IP>
+lab_api_key=<API_KEY>
+```
+
+On Windows, save [.env.example](.env.example) as `%USERPROFILE%\.edgeconnect-mcp\.env` instead.
+
+### 2. Install
+
+**Claude Code** gets the server and the guide skill in one go:
 
 ```bash
-claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeconnect-mcp@v0.2.2 edgeconnect-mcp --dotenv /absolute/path/.env
+claude plugin marketplace add Crypto-Gi/edgeconnect-mcp && claude plugin install edgeconnect@edgeconnect-mcp
 ```
 
-[docs/clients.md](docs/clients.md) has the config for Claude Desktop, Codex, OpenCode, VS Code, Cursor, Windsurf and Devin. To run the server on another machine or behind an HTTPS proxy, see [Remote access](#remote-access).
+**Any other MCP client** (Claude Desktop, Codex, OpenCode, VS Code, Cursor, Windsurf, Devin): the server command is
+
+```bash
+npx -y github:Crypto-Gi/edgeconnect-mcp
+```
+
+[docs/clients.md](docs/clients.md) has the ready-made config for each client. Then add the [guide skill](#guide-skill); it asks which agents to add it to:
+
+```bash
+npx skills add Crypto-Gi/edgeconnect-mcp
+```
+
+### 3. Check it
+
+Restart your client and ask "list my EdgeConnect orchestrators". That calls `list_orchestrators`, which needs no network, and should return this, with your address as `host`:
+
+```json
+[{"name": "lab", "host": "192.0.2.10", "writes_enabled": false, "passthrough_writes_enabled": false,
+  "write_confirmation": true, "high_risk_allowed": [], "default": true}]
+```
+
+Then ask "show the appliances on lab". That one reaches the Orchestrator, so a wrong address, key or certificate shows up there.
+
+These commands install the latest code on `main`, which only changes through pull requests that pass CI. To pin a release, to use uv, pipx, Docker or a clone, or to update, see [docs/install.md](docs/install.md).
 
 ## Guide skill
 
@@ -152,39 +126,6 @@ claude mcp add edgeconnect -- uvx --from git+https://github.com/Crypto-Gi/edgeco
 - **Playbooks:** for common jobs, such as adding a BGP neighbor or a segment, a playbook that reads current state before writing and says how to roll back.
 
 The playbooks are for reference only. Every operation the skill names passed in a real run on Orchestrator 9.7.1 between 2026-10-16 and 2026-10-20 (listed in `tested-operations.tsv`). Steps that could not be tested were left out, or point to the Orchestrator UI.
-
-### Add the guide skill
-
-- **Claude Code:** the [plugin](#quick-start-claude-code) includes it.
-- **Other agents:** the open [`skills`](https://github.com/vercel-labs/skills) installer copies it into each agent's skills folder:
-
-  ```bash
-  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.2                                     # pick agents interactively
-  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.2 -a codex opencode windsurf devin -y  # or name them
-  npx skills add https://github.com/Crypto-Gi/edgeconnect-mcp.git#v0.2.2 -g -a claude-code -y                # -g: for your user, not this project
-  ```
-
-  It supports Claude Code, Codex, OpenCode, GitHub Copilot (VS Code), Cursor, Windsurf, Devin for Terminal and about 50 more.
-- **claude.ai:** zip the folder from a clone, then upload it in Settings > Capabilities > Skills:
-
-  ```bash
-  cd skills && zip -r ../edgeconnect-guide.zip edgeconnect-guide -x '*/__pycache__/*'
-  ```
-
-- **By hand:** copy `skills/edgeconnect-guide` into the agent's skills folder, for example `~/.claude/skills/`.
-
-`scripts/check_links.py` checks the cards and playbooks:
-
-- their format;
-- that every link is in a doc inventory;
-- that every operation is in `tested-operations.tsv` and exists in an Orchestrator's API spec;
-- that every playbook carries the reference-only notice.
-
-It can also HTTP-check developer portal links. HPE techdocs refuse scripted requests, so those links are not HTTP-checked.
-
-```bash
-python3 skills/edgeconnect-guide/scripts/check_links.py --inventory <inventory>/*.tsv --spec <apiDocs.json> --http
-```
 
 ## Safety model
 
@@ -233,7 +174,7 @@ Punctuation is ignored when matching (`edge-ha` = `edgeha`), and passthrough wri
 To see exactly what the list refuses on one Orchestrator:
 
 ```bash
-edgeconnect-mcp --dotenv .env --list-high-risk lab
+npx -y github:Crypto-Gi/edgeconnect-mcp --list-high-risk lab
 ```
 
 ### Secret redaction

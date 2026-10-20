@@ -84,7 +84,7 @@ claude mcp add --transport http edgeconnect https://mcp.example.internal/mcp --h
 
 ## Caddy
 
-This runs the server directly on the machine (any [install](../README.md#install-the-server)) and Caddy on the same machine.
+This runs the server directly on the machine (any [install](install.md)) and Caddy on the same machine.
 
 1. Start the server in HTTP mode, on 127.0.0.1:
 
@@ -126,7 +126,7 @@ Caddy sets `X-Forwarded-For` from the real peer, and arrives from 127.0.0.1, so 
 The image runs as a non-root user and needs nothing from PyPI. Build it from a clone:
 
 ```bash
-git clone --branch v0.2.2 https://github.com/Crypto-Gi/edgeconnect-mcp.git
+git clone https://github.com/Crypto-Gi/edgeconnect-mcp.git
 cd edgeconnect-mcp
 docker build -t edgeconnect-mcp .
 ```
