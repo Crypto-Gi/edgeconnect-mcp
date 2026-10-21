@@ -10,7 +10,7 @@ where = ["src"]
 
 [project]
 name = "edgeconnect-mcp"
-version = "0.2.10"
+version = "0.2.11"
 description = "Secure MCP server for the HPE Aruba EdgeConnect Orchestrator REST API"
 readme = "README.md"
 license = { file = "LICENSE" }
