@@ -1,6 +1,6 @@
 {
   "name": "edgeconnect",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "description": "EdgeConnect Orchestrator MCP server plus the edgeconnect-guide skill (doc map, tested operations, playbooks)",
   "author": {
     "name": "Crypto-Gi"
