@@ -174,6 +174,8 @@ def _private_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())  # on disk before it replaces the old file, so a power cut cannot leave it empty
         os.replace(tmp, path)
     except BaseException:
         os.unlink(tmp)

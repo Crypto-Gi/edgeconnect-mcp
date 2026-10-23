@@ -84,7 +84,8 @@ _STATUS_WORDS = {"green": ("healthy", "on target", "meets target", "met target",
 MAX_TEXT = 1200
 # Figures written as words are figures too.
 _NUMBER_WORDS = re.compile(r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
-                           r"eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|dozen|half|twice|percent)\b", re.I)
+                           r"eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|thousands?|millions?|dozens?|half|twice|double|triple|third|quarter|"
+                           r"percent)\b", re.I)
 # Digits that are names, not figures: P95, the 24-hour and 7-day windows, software releases.
 _FIXED_TERMS = re.compile(r"\bP\d{2}\b|\blast (?:24 hours|7 days)\b|\b(?:ECOS|release|version|Orchestrator)\s+\d+(?:\.\d+)+\b", re.I)
 
@@ -232,10 +233,13 @@ def _collect_availability(c: Collector, nepks: List[str], first: date, start_ms:
     # The Orchestrator keeps 7 days of alarms: anything older in the period comes from the archive (`report store`), or is a gap.
     history = History(root, c.orchestrator)
     older_until = min(end_ms, now_ms - 7 * 86400000)
-    c.data["period_alarms_covered"] = start_ms >= older_until or history_missing(history.coverage().get("alarms", []), start_ms, older_until) == []
-    stored = [a for a in history.load("alarms", start_ms, end_ms) if a.get("applianceId") in nepks]
-    if isinstance(c.data.get("appliance_alarms"), list):
-        c.data["appliance_alarms"] = _merge_by_id(c.data["appliance_alarms"], stored)
+    listed = c.data.get("appliance_alarms")
+    archived = history_missing(history.coverage().get("alarms", []), start_ms, older_until) == []
+    # Only the alarm list can take archived alarms; the GET counts fallback cannot reach back past 7 days at all.
+    c.data["period_alarms_covered"] = start_ms >= older_until or (isinstance(listed, list) and archived)
+    if isinstance(listed, list):
+        c.data["appliance_alarms_capped"] = len(listed) >= MAX_ALARMS
+        c.data["appliance_alarms"] = _merge_by_id(listed, [a for a in history.load("alarms", start_ms, end_ms) if a.get("applianceId") in nepks])
 
 
 def _collect_noc(c: Collector, nepks: List[str], now_s: int) -> None:
@@ -672,7 +676,7 @@ def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     if not covered:
         gaps.append("Alarms in the period: the Orchestrator keeps 7 days of alarms and the alarm archive (`report store`) does not cover the rest of the period, "
                     "so the counts are not shown.")
-    if isinstance(listed, list) and len(listed) >= MAX_ALARMS:
+    if isinstance(listed, list) and data.get("appliance_alarms_capped", len(listed) >= MAX_ALARMS):
         gaps.append("Alarms in the period: the list reached the {}-alarm cap, so the counts may be low.".format(MAX_ALARMS))
     if isinstance(listed, list):
         for alarm in listed:
@@ -772,7 +776,8 @@ def _incident(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     if not data.get("incident_alarms_stored"):
         gaps.append("Part of the window, or the 24 hours before it, is older than the 7 days of alarms the Orchestrator keeps and is not in the alarm archive "
                     "(`report store`), so alarms raised then may be missing.")
-    gaps.extend("Alarms: " + n for n in data.get("incident_alarm_notes") or [])
+    for note in dict.fromkeys(data.get("incident_alarm_notes") or []):  # the alarm-id lookup and the window read can say the same thing
+        gaps.append("Alarms: " + note)
     get_only_list = data.get("incident_alarm_source") == "GET /alarm/correlatedAlarms"
     if get_only_list:
         gaps.append("Alarms come from the correlated alarm list (GET-only): it is empty when alarm correlation is off, and closed alarms carry no clear time, "
@@ -841,7 +846,7 @@ def _incident(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         gaps.append("Changes: the audit log could not be read for every appliance in scope.")
     # A count that a full page may have cut is not shown as a number: before is cut whenever a page is full, during if a page
     # reached back no further than the window's start.
-    reached = min((page["oldest"] for page in full), default=None)
+    reached = max((page["oldest"] for page in full), default=None)  # "during" is complete only if every full page reached back before the start
     n_before = None if full or not read_ok else len(before)
     n_during = None if not read_ok or (reached is not None and reached > start) else len(changes) - len(before)
     sections["inc-changes"] = {"status": "grey" if not read_ok and not changes else "green",
@@ -1073,8 +1078,8 @@ def _lifecycle(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     sections["life-licences"] = {"status": lic_status, "table": sorted(lic_rows, key=lambda r: r["days_left"]),
                                  "metrics": [metric("license_days_left", days, "days", "Days until the Orchestrator licence expires", _expiry_status(days) if isinstance(days, int) else None),
                                              metric("license_used", lic.get("usedAppliances") if lic else None, "appliances", "Licensed appliances in use"),
-                                             metric("licences_expiring_90", expiring[90] if isinstance(portal, dict) else None, "appliances", "Appliance licences expiring within 90 days"),
-                                             metric("licences_expiring_30", expiring[30] if isinstance(portal, dict) else None, "appliances", "Appliance licences expiring within 30 days")],
+                                             metric("licences_expiring_90", expiring[90] if portal_dates else None, "appliances", "Appliance licences expiring within 90 days"),
+                                             metric("licences_expiring_30", expiring[30] if portal_dates else None, "appliances", "Appliance licences expiring within 30 days")],
                                  "notes": ["Rule: 30 days or less red, 90 days or less amber."]}
 
     # Backups: the newest appliance backup each appliance has on the Orchestrator.

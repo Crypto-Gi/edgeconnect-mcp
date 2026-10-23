@@ -770,5 +770,44 @@ class ReviewRound3CollectTests(CollectTests):
         self.assertIn("only for --report incident", "".join(str(c) for c in err.write.call_args_list))
 
 
+class ReviewRound4Tests(unittest.TestCase):
+    def incident(self, **data):
+        b = bundle(incident={"from_ms": T0, "to_ms": T0 + 3600000, "affected": ["1.NE", "2.NE"]}, incident_alarms_stored=True, **data)
+        b["report"] = "incident"
+        return report.compute(b)
+
+    def test_during_is_a_number_only_if_every_full_page_reached_back_before_the_window(self):
+        audit = [{"id": i, "queuedTime": T0 + 60000 * i, "nepk": "1.NE"} for i in range(1, 4)]
+        m = self.incident(incident_audit=audit, incident_audit_full=[{"appliance": "1.NE", "oldest": T0 - 3600000}, {"appliance": "2.NE", "oldest": T0 + 600000}])
+        self.assertIsNone(m["metrics"]["inc_changes_during"]["value"])  # 2.NE's page stopped 10 minutes into the window
+        m = self.incident(incident_audit=audit, incident_audit_full=[{"appliance": "1.NE", "oldest": T0 - 3600000}])
+        self.assertEqual(m["metrics"]["inc_changes_during"]["value"], 3)
+
+    def test_repeated_alarm_notes_appear_once(self):
+        m = self.incident(incident_alarm_notes=["windows not read", "windows not read"])
+        self.assertEqual(sum("windows not read" in g for g in m["sections"]["data-gaps"]["notes"]), 1)
+
+    def test_plural_and_fractional_number_words(self):
+        metrics = report.compute(bundle())
+        for text in ("Thousands of alarms were raised.", "A third of the sites.", "Traffic doubled, then triple."):
+            self.assertIn("bare number", " ".join(report.validate(metrics, {"report": "availability", "sections": {"avail-summary": {"text": text}}})), text)
+
+    def test_merged_archive_alarms_do_not_trip_the_cap_gap_and_expiry_counts_need_dates(self):
+        m = report.compute(bundle(appliance_alarms=[{"applianceId": "1.NE", "severity": "MINOR"}] * 3, appliance_alarms_capped=False))
+        self.assertNotIn("cap", " ".join(m["sections"]["data-gaps"]["notes"]))
+        m = report.compute(phase2_bundle("lifecycle", gms_license={"daysToExpiration": 400}, portal_appliances={"data": [{"applianceId": "1.NE"}]}))
+        self.assertIsNone(m["metrics"]["licences_expiring_90"]["value"])
+
+
+class ReviewRound4CollectTests(CollectTests):
+    def test_get_only_counts_cannot_use_the_archive_so_last_month_is_a_gap(self):
+        root = Path(self.tmp.name) / "history"
+        History(root, "lab").add_coverage("alarms", [[1788220800000, 1790812799000]])  # an archive that covers September
+        b = report.collect(self.server(RoutedClient(self.answers()), get_only=True), "lab", "availability", "2026-09", history_root=root,
+                           now=datetime(2026, 10, 23, tzinfo=timezone.utc))
+        self.assertFalse(b["data"]["period_alarms_covered"])
+        self.assertIsNone(report.compute(b)["metrics"]["alarms_critical"]["value"])
+
+
 if __name__ == "__main__":
     unittest.main()
