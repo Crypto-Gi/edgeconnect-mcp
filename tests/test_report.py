@@ -13,7 +13,7 @@ PATHS = ["/gms/versions", "/appliance", "/stats/config/availabilityThreshold", "
          "/stats/aggregate/availability/tunnel", "/health/alarmPeriodSummary", "/alarm/summary", "/gmsLicense", "/license/portal/summary",
          "/alarm/count/appliance", "/gms/stats/nonStatsTable/retention", "/maintenanceMode", "/tunnels2/physical", "/tunnels2/bonded",
          "/stats/timeseries/interfaceOverlay", "/stats/timeseries/interface", "/license/portal/appliance", "/appliance/backup",
-         "/health/healthThresholdConfig", "/stats/aggregate/tunnel"]
+         "/health/healthThresholdConfig", "/stats/aggregate/tunnel", "/action", "/stats/timeseries/availability/appliance", "/alarm/correlatedAlarms"]
 POSTS = ["/alarm/appliance", "/health", "/stats/aggregate/interface"]
 SPEC = {"swagger": "2.0", "basePath": "/gms/rest", "paths": dict({p: {"get": {"summary": p}} for p in PATHS}, **{p: {"post": {"summary": p}} for p in POSTS})}
 APPLIANCES = [{"nePk": "1.NE", "hostName": "branch-a", "state": 1, "model": "EC-V", "softwareVersion": "9.6.2.1_1", "serial": "SN-0001"},
@@ -567,6 +567,113 @@ class ReviewRound2Tests(unittest.TestCase):
         self.assertIn("older than the 31 days of daily statistics", " ".join(report.compute(b)["sections"]["data-gaps"]["notes"]))
         b["period"].update(from_ms=(NOW - 10 * 86400) * 1000)
         self.assertNotIn("daily statistics", " ".join(report.compute(b)["sections"]["data-gaps"]["notes"]))
+
+
+T0 = 1790000000000  # incident window start, ms
+AUDIT = [{"id": 1, "queuedTime": T0 - 3600000, "user": "admin", "name": "Apply Appliance Template", "nepk": "1.NE", "completionStatus": True},
+         {"id": 2, "queuedTime": T0 + 600000, "user": "admin", "name": "Segment Security Policy Changed", "nepk": "1.NE", "completionStatus": False, "result": "refused"},
+         {"id": 3, "queuedTime": T0 + 900000, "user": "SYSTEM", "name": "Login HPE Aruba Networking EdgeConnect SD-WAN Orchestrator", "completionStatus": True},
+         {"id": 4, "queuedTime": T0 - 2 * 86400000, "user": "old", "name": "Too early", "completionStatus": True}]
+ALARMS = [{"id": 10, "applianceId": "1.NE", "severity": "CRITICAL", "name": "TUNNEL_DOWN", "description": "Tunnel down", "timeOccurredInMills": T0 + 60000, "clearedTimeInMills": T0 + 1260000},
+          {"id": 11, "applianceId": "1.NE", "severity": "MAJOR", "name": "LINK", "description": "Link down", "timeOccurredInMills": T0 - 7200000},  # open since before
+          {"id": 12, "applianceId": "2.NE", "severity": "MINOR", "name": "OLD", "description": "cleared before", "timeOccurredInMills": T0 - 7200000, "clearedTimeInMills": T0 - 3600000},
+          {"id": 13, "applianceId": "1.NE", "severity": "CRITICAL", "name": "BAD_IP", "description": "raised days before, still open", "timeOccurredInMills": T0 - 3 * 86400000}]
+
+
+class WindowClient(RoutedClient):
+    """Answers /action and /alarm/appliance by time window, like the Orchestrator."""
+
+    def request(self, method, path, **kwargs):
+        q = kwargs.get("query") or {}
+        if path == "/action":
+            self.calls.append((method, path, q, None))
+            rows = sorted([r for r in AUDIT if q["startTime"] <= r["queuedTime"] <= q["endTime"] and q.get("appliance") in (None, r.get("nepk"))], key=lambda r: -r["queuedTime"])
+            return json.dumps(rows[:q["limit"]]).encode()  # newest first, cut at the limit
+        if path == "/alarm/appliance":
+            self.calls.append((method, path, q, kwargs.get("json_body")))
+            return json.dumps([a for a in ALARMS if q["from"] <= a["timeOccurredInMills"] <= q["to"]]).encode()
+        if path == "/alarm/correlatedAlarms":  # GET-only alarm list: closed ones carry no clear time
+            self.calls.append((method, path, q, None))
+            if q["view"] == "closed":
+                return json.dumps([dict(a, clearedTimeInMills=None, clearedTime=None, closed=True) for a in ALARMS
+                                   if a.get("clearedTimeInMills") and q["from"] <= a["timeOccurredInMills"] <= q["to"]]).encode()
+            return json.dumps([dict(a, closed=False) for a in ALARMS if not a.get("clearedTimeInMills")]).encode()
+        if path == "/stats/timeseries/availability/appliance":
+            self.calls.append((method, path, q, None))
+            return json.dumps({"data": [{"timestamp": T0 // 1000 + 60 * i, "samplecount": 1, "appliancereachability": 0 if i < 10 else 1} for i in range(60)]}).encode()
+        return super().request(method, path, **kwargs)
+
+
+class IncidentTests(CollectTests):
+    def setUp(self):
+        super().setUp()
+        self.store = Path(self.tmp.name) / "history"
+
+    def collect(self, report_name, get_only=False, **kwargs):
+        client = WindowClient(self.answers())
+        kwargs.setdefault("now", datetime.fromtimestamp(T0 / 1000 + 86400, timezone.utc))
+        return client, report.collect(self.server(client, get_only=get_only), "lab", report_name, history_root=self.store, **kwargs)
+
+    def test_incident_timeline_reachability_and_changes(self):
+        start = datetime.fromtimestamp(T0 / 1000, timezone.utc)
+        client, b = self.collect("incident", window=(start, datetime.fromtimestamp(T0 / 1000 + 3600, timezone.utc)))
+        m = report.compute(b)
+        timeline = m["sections"]["inc-timeline"]["table"]
+        self.assertEqual([r["alarm"] for r in timeline], ["BAD_IP", "LINK", "TUNNEL_DOWN"])  # open in the window, even if raised days before; the one cleared before is out
+        v = {k: m["metrics"][k]["value"] for k in ("inc_alarms", "inc_critical", "inc_open_at_end", "inc_median_clear_min", "inc_changes_before", "inc_changes_during", "inc_affected")}
+        self.assertEqual(v, {"inc_alarms": 3, "inc_critical": 2, "inc_open_at_end": 2, "inc_median_clear_min": 20.0, "inc_changes_before": 1, "inc_changes_during": 2, "inc_affected": 1})
+        self.assertEqual(m["sections"]["inc-appliances"]["table"][0]["reachable_pct"], 83.333)  # 10 of 60 minutes unreachable
+        self.assertEqual(m["sections"]["inc-summary"]["status"], "red")
+        self.assertIn("does not say whether any change caused", " ".join(m["sections"]["inc-changes"]["notes"]))
+        paths = [c for c in client.calls if c[1] == "/stats/aggregate/tunnel"]
+        self.assertEqual(paths[0][2]["granularity"], "minute")  # the window is inside a day of now
+        self.assertIn("Report options: window:", report.render(m))
+        self.assertFalse([g for g in m["sections"]["data-gaps"]["notes"] if "alarm archive" in g])  # the window is inside the Orchestrator's 7 days
+        client, b = self.collect("incident", window=(start, datetime.fromtimestamp(T0 / 1000 + 3600, timezone.utc)), now=datetime.fromtimestamp(T0 / 1000 + 30 * 86400, timezone.utc))
+        self.assertIn("alarm archive", " ".join(report.compute(b)["sections"]["data-gaps"]["notes"]))  # a month later, without an archive
+
+    def test_a_full_audit_page_shows_what_was_read_and_names_the_rest_as_a_gap(self):
+        from unittest import mock
+        start = datetime.fromtimestamp(T0 / 1000, timezone.utc)
+        with mock.patch.object(report, "AUDIT_PAGE", 2):
+            client, b = self.collect("incident", window=(start, datetime.fromtimestamp(T0 / 1000 + 3600, timezone.utc)))
+            m = report.compute(b)
+        self.assertEqual([c[2]["limit"] for c in client.calls if c[1] == "/action"], [2])  # one live page, never stored
+        self.assertEqual(len(m["sections"]["inc-changes"]["table"]), 2)
+        self.assertIn("busy audit log", " ".join(m["sections"]["data-gaps"]["notes"]))
+        self.assertIn("remote log receiver", " ".join(m["sections"]["data-gaps"]["notes"]))
+        self.assertFalse((self.store / "lab" / "audit").exists())
+
+    def test_get_only_incident_uses_the_correlated_alarm_list_and_scoped_audit_reads(self):
+        start = datetime.fromtimestamp(T0 / 1000, timezone.utc)
+        client, b = self.collect("incident", get_only=True, appliances=["branch-a"], window=(start, datetime.fromtimestamp(T0 / 1000 + 3600, timezone.utc)))
+        self.assertFalse([c for c in client.calls if c[0] == "POST"])
+        self.assertEqual(sorted(c[2]["view"] for c in client.calls if c[1] == "/alarm/correlatedAlarms"), ["active", "closed"])
+        self.assertEqual([c[2].get("appliance") for c in client.calls if c[1] == "/action"], ["1.NE"])  # one page per scoped appliance
+        m = report.compute(b)
+        rows = {r["alarm"]: r for r in m["sections"]["inc-timeline"]["table"]}
+        self.assertEqual(set(rows), {"BAD_IP", "LINK", "TUNNEL_DOWN"})  # OLD was closed before the window: raised outside it, so left out
+        self.assertEqual((rows["TUNNEL_DOWN"]["cleared"], rows["TUNNEL_DOWN"]["minutes_to_clear"]), ("closed, time not given", None))
+        self.assertEqual(m["metrics"]["inc_open_at_end"]["value"], 2)
+        self.assertEqual({r["action"] for r in m["sections"]["inc-changes"]["table"]}, {"Apply Appliance Template", "Segment Security Policy Changed"})
+
+    def test_incident_window_from_an_alarm_id_and_required_inputs(self):
+        client, b = self.collect("incident", alarm_id="10")
+        self.assertEqual((b["period"]["from_ms"], b["period"]["to_ms"]), (T0 + 60000 - 3600000, T0 + 1260000 + 3600000))
+        with self.assertRaisesRegex(ValueError, "needs --from and --to"):
+            self.collect("incident")
+        with self.assertRaisesRegex(ValueError, "not in the Orchestrator"):
+            self.collect("incident", alarm_id="999")
+
+    def test_store_command(self):
+        from unittest import mock
+        client = WindowClient(self.answers())
+        server = self.server(client, get_only=False)
+        with mock.patch.object(report.Server, "from_dotenv", return_value=server), mock.patch("sys.stdout") as out:
+            code = report.main(["store", "--orchestrator", "lab", "--history", str(self.store)])
+        self.assertEqual(code, 0)
+        self.assertFalse((self.store / "lab" / "audit").exists())  # the audit log is never stored
+        self.assertIn("alarms", json.loads((self.store / "lab" / "coverage.json").read_text()))  # last 7 days read (none in the fixture are that recent)
 
 
 if __name__ == "__main__":

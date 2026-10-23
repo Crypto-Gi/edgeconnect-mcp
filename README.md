@@ -158,7 +158,7 @@ The playbooks are for reference only. Every operation the skill names passed in 
 
 ## Report skill
 
-`skills/edgeconnect-report/` builds five reports: `availability` (monthly service level), `noc` (what is broken now, last 24 hours and 7 days), `capacity` (WAN links by P95 utilisation), `lifecycle` (software, licences, backups and known security advisories) and `executive` (a one-page summary of all of them). Code does the reading and the maths; the assistant only writes the prose, and a validator rejects prose that types a number or contradicts a computed status:
+`skills/edgeconnect-report/` builds six reports: `availability` (monthly service level and path quality), `noc` (what is broken now, last 24 hours and 7 days), `capacity` (WAN links by P95 utilisation), `lifecycle` (software, licences, backups and known security advisories), `incident` (one window: alarms, affected sites, and changes before and during, read live from the audit log) and `executive` (a one-page summary). `edgeconnect-mcp report store` keeps alarms in `~/.edgeconnect-mcp/history/` past the Orchestrator's own 7 days; run it daily from cron or launchd. The audit log is not stored; for a full audit trail use a remote log receiver. Code does the reading and the maths; the assistant only writes the prose, and a validator rejects prose that types a number or contradicts a computed status:
 
 ```bash
 edgeconnect-mcp report collect --orchestrator lab --report availability --period last-month --out rep   # options: --scope, --target, --down-tunnels
