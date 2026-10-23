@@ -225,6 +225,7 @@ POST	/stats/aggregate/interface
 GET	/stats/aggregate/securityPolicy
 GET	/stats/aggregate/trafficClass
 POST	/stats/aggregate/trafficClass
+GET	/stats/config/availabilityThreshold
 POST	/stats/timeseries/addos/maxTimestamp
 POST	/stats/timeseries/addos/trends/baselineZone
 GET	/stats/timeseries/appliance

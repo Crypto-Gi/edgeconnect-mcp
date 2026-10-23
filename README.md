@@ -18,7 +18,7 @@ You ask in plain language ("which appliances on the lab are unreachable?") inste
 - **Every call is audited** to a local JSON-lines log, and optionally to syslog and SQLite.
 - **No dependencies.** Pure Python 3.9+ standard library. Runs over stdio, locally, over SSH or in a container, or as an HTTP endpoint behind an HTTPS proxy.
 - **Current MCP spec.** Speaks MCP 2026-07-28 (stateless, `server/discover`) and still answers older clients that open with `initialize` (2025-11-25 back to 2024-11-05).
-- **Comes with a guide skill** that tells the assistant which official docs and tested operations to use for each feature.
+- **Comes with a guide skill** that tells the assistant which official docs and tested operations to use for each feature, and a **report skill** that turns Orchestrator data into a monthly availability report or an executive summary (one HTML file; code computes every number).
 - **Tested on a real Orchestrator.** Run end to end against Orchestrator 9.7.1 with five EC-V appliances (ECOS 9.6 and 9.7), including two-step writes, the audit outputs and HTTPS through Caddy and Nginx Proxy Manager.
 
 > Independent project, not affiliated with or supported by HPE. Provided as is, without warranty: you are responsible for every change made through it, by you or by an assistant you connect. See [NOTICE](NOTICE).
@@ -33,6 +33,7 @@ It reads the same `.env` format as [edgeconnect-orchestrator-automation](https:/
 | `find_operations` | Keyword search over the Orchestrator's own API spec. |
 | `describe_operation` | Parameters and request-body schema for one operation. |
 | `api_get` | Any documented GET. |
+| `api_read_post` | Only the three read-only POST queries the API has no GET for: `/alarm/appliance` (appliance alarms), `/stats/aggregate/interface` (interface totals) and `/health` (hourly health). Allowed with writes off, without confirmation. |
 | `api_write` | Any documented POST, PUT, PATCH or DELETE, only on Orchestrators with writes enabled. |
 
 Paths are relative to `/gms/rest`, for example `/appliance` or `/gms/versions`. Responses are truncated to `max_chars` (default 60,000) so one call cannot flood the conversation.
@@ -155,9 +156,24 @@ The [install guide](docs/install.md) walks through every route the same way, ste
 
 The playbooks are for reference only. Every operation the skill names passed in a real run on Orchestrator 9.7.1 between 2026-10-16 and 2026-10-20 (listed in `tested-operations.tsv`). Steps that could not be tested were left out, or point to the Orchestrator UI.
 
+## Report skill
+
+`skills/edgeconnect-report/` builds an `availability` (monthly service level) or `executive` (one-page summary) report. Code does the reading and the maths; the assistant only writes the prose, and a validator rejects prose that types a number or contradicts a computed status:
+
+```bash
+edgeconnect-mcp report collect --orchestrator lab --report availability --month 2026-09 --out rep
+edgeconnect-mcp report compute rep/bundle.json
+edgeconnect-mcp report template rep/metrics.json      # sections, statuses and metric ids for the prose
+edgeconnect-mcp report validate rep/metrics.json rep/narrative.json
+edgeconnect-mcp report render rep/metrics.json rep/narrative.json --out rep/report.html
+```
+
+`collect` uses the server's own code and `.env`, so the allowlist, redaction, audit log and `get_only` apply; on a GET-only Orchestrator it uses GET alternatives and lists what it could not fetch. The HTML is one file with inline CSS and SVG, no scripts, and prints on A4. The WAN capacity, NOC digest and lifecycle sections of the executive summary stay grey until those reports are built.
+
 ## Safety model
 
 - **Read-only by default.** `api_write` is refused unless `.env` has `<nickname>_mcp_writes=true` for that Orchestrator. Turn it on only for lab Orchestrators, or deliberately.
+- **Three read-only POSTs, and nothing else.** `api_read_post` accepts exactly `POST /alarm/appliance`, `POST /stats/aggregate/interface` and `POST /health` (the `READ_POSTS` list in `server.py`); every other POST stays a write. `<nickname>_mcp_get_only=true` turns them off for an Orchestrator.
 - **Raw passthroughs need a second opt-in.** `/appliance/rest` and `/broadcastCli` forward any request to an appliance's own API or CLI, so the spec cannot limit what they change. Writes through them also need `<nickname>_mcp_passthrough=true`.
 - **Spec allowlist.** Every call must match a method and path in the spec the Orchestrator serves (`/gms/rest/apiDocs`, the same one Support > REST APIs shows). Undocumented paths, `..`, encoded separators and anything that would leave `/gms/rest` are rejected.
 - **Separate read and write tools.** `api_write` is marked destructive, so MCP clients ask before each call; reads can be auto-approved.
@@ -234,6 +250,7 @@ lab_tls_sha256=<SHA-256 fingerprint>
 | `<nickname>_mcp_writes` | off | `true` allows `api_write` |
 | `<nickname>_mcp_passthrough` | off | `true` also allows writes through `/appliance/rest` and `/broadcastCli` |
 | `<nickname>_mcp_confirm_writes` | on | `false` turns off two-step writes for that Orchestrator |
+| `<nickname>_mcp_get_only` | off | `true` refuses `api_read_post` too, so only GETs reach that Orchestrator (for read-only keys) |
 | `<nickname>_mcp_allow_high_risk` | none | Blocklist categories to allow, comma-separated, or `all` |
 | `<nickname>_mcp_read_rate` | `10` | Reads per second, `0` = no limit |
 | `<nickname>_mcp_write_rate` | `2` | Writes per second, `0` = no limit |
