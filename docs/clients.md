@@ -10,7 +10,7 @@ Claude Code, Codex and OpenCode were tested with this server. The VS Code, Curso
 
 ## Claude Code
 
-The [plugin](../README.md#2-install) installs the server and the guide skill together. To add only the server:
+The [plugin](../README.md#2-install) installs the server and both skills (guide and report) together. To add only the server:
 
 ```bash
 claude mcp add edgeconnect -- npx -y github:Crypto-Gi/edgeconnect-mcp

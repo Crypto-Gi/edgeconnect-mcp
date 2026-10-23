@@ -11,14 +11,14 @@
 
 <sub>A real Claude Code session against Orchestrator 9.7.1 through edgeconnect-mcp v0.2.1, reads only. Claude's answers are shown as given.</sub>
 
-You ask in plain language ("which appliances on the lab are unreachable?") instead of clicking through the Orchestrator UI or hand-writing REST calls. The assistant finds the right one of the Orchestrator's ~1,200 API operations and calls it. MCP (Model Context Protocol) is the standard way AI assistants call external tools; this server gives them five generic tools that cover the whole REST API on 9.7 / 10.0, by reading the API spec the Orchestrator itself serves.
+You ask in plain language ("which appliances on the lab are unreachable?") instead of clicking through the Orchestrator UI or hand-writing REST calls. The assistant finds the right one of the Orchestrator's ~1,200 API operations and calls it. MCP (Model Context Protocol) is the standard way AI assistants call external tools; this server gives them six generic tools that cover the whole REST API on 9.7 / 10.0, by reading the API spec the Orchestrator itself serves.
 
 - **Read-only unless you opt in**, per Orchestrator, with a blocklist of high-risk writes on top, and every write needs a second, confirmed call.
 - **Secrets never reach the assistant.** Keys, passwords, PSKs and SNMP community strings come back redacted and are restored only when written back to where they came from.
 - **Every call is audited** to a local JSON-lines log, and optionally to syslog and SQLite.
 - **No dependencies.** Pure Python 3.9+ standard library. Runs over stdio, locally, over SSH or in a container, or as an HTTP endpoint behind an HTTPS proxy.
 - **Current MCP spec.** Speaks MCP 2026-07-28 (stateless, `server/discover`) and still answers older clients that open with `initialize` (2025-11-25 back to 2024-11-05).
-- **Comes with a guide skill** that tells the assistant which official docs and tested operations to use for each feature, and a **report skill** that turns Orchestrator data into a monthly availability report or an executive summary (one HTML file; code computes every number).
+- **Comes with a guide skill** that tells the assistant which official docs and tested operations to use for each feature, and a **report skill** that turns Orchestrator data into one of six reports: availability, NOC digest, WAN capacity, lifecycle, major incident or an executive summary (one HTML file; code computes every number).
 - **Tested on a real Orchestrator.** Run end to end against Orchestrator 9.7.1 with five EC-V appliances (ECOS 9.6 and 9.7), including two-step writes, the audit outputs and HTTPS through Caddy and Nginx Proxy Manager.
 
 > Independent project, not affiliated with or supported by HPE. Provided as is, without warranty: you are responsible for every change made through it, by you or by an assistant you connect. See [NOTICE](NOTICE).
@@ -29,11 +29,11 @@ It reads the same `.env` format as [edgeconnect-orchestrator-automation](https:/
 
 | Tool | What it does |
 |---|---|
-| `list_orchestrators` | Configured nicknames, host, and whether writes are enabled. Never shows keys. |
+| `list_orchestrators` | Configured nicknames and hosts, and per Orchestrator whether writes, passthrough writes, two-step confirmation and the read-only POSTs (`read_posts_enabled`) are on. Never shows keys. |
 | `find_operations` | Keyword search over the Orchestrator's own API spec. |
 | `describe_operation` | Parameters and request-body schema for one operation. |
 | `api_get` | Any documented GET. |
-| `api_read_post` | Only the three read-only POST queries the API has no GET for: `/alarm/appliance` (appliance alarms), `/stats/aggregate/interface` (interface totals) and `/health` (hourly health). Allowed with writes off, without confirmation. |
+| `api_read_post` | Only the three read-only POST queries the API has no GET for: `/alarm/appliance` (appliance alarms), `/stats/aggregate/interface` (interface totals) and `/health` (hourly health). Allowed with writes off, without confirmation, on the read rate limit, and audited as `POST`. Refused where `<nickname>_mcp_get_only=true`. |
 | `api_write` | Any documented POST, PUT, PATCH or DELETE, only on Orchestrators with writes enabled. |
 
 Paths are relative to `/gms/rest`, for example `/appliance` or `/gms/versions`. Responses are truncated to `max_chars` (default 60,000) so one call cannot flood the conversation.
@@ -72,10 +72,10 @@ Three repositories that work together:
 | Repository | What it does | Agent skill |
 |---|---|---|
 | [edgeconnect-orchestrator-automation](https://github.com/Crypto-Gi/edgeconnect-orchestrator-automation) | `edgeconnect-auto` CLI: deploys and removes firewall policies, zones, address, service and application groups, application definitions and template-group ACLs from reviewed CSVs, with a dry run, a typed `APPLY` and readback verification. | `managing-edgeconnect-firewall-and-objects` |
-| [edgeconnect-preconfig](https://github.com/Crypto-Gi/edgeconnect-preconfig) | Turns an existing appliance into a Jinja2 + CSV preconfiguration template, then renders, validates and uploads one preconfig per site. | `building-edgeconnect-preconfig-templates` |
-| [edgeconnect-mcp](https://github.com/Crypto-Gi/edgeconnect-mcp) (this repository) | MCP server that lets Claude or any MCP client read, and with your approval change, an Orchestrator through its REST API. | `edgeconnect-guide` |
+| [edgeconnect-preconfig](https://github.com/Crypto-Gi/edgeconnect-preconfig) | `edgeconnect-preconfig` command: turns an existing appliance into a Jinja2 + CSV preconfiguration template, then builds, validates and, with `upload --approve`, uploads one preconfig per site. | `building-edgeconnect-preconfig-templates` |
+| [edgeconnect-mcp](https://github.com/Crypto-Gi/edgeconnect-mcp) (this repository) | MCP server that lets Claude or any MCP client read, and with your approval change, an Orchestrator through its REST API, plus the `edgeconnect-mcp report` command. | `edgeconnect-guide`, `edgeconnect-report` |
 
-**Install the CLI, the preconfig scripts and their two skills** (macOS and Linux; needs git, Python 3.9 or later and, for the skills, Node.js 18 or later):
+**Install the toolkit: the CLI, the preconfig command, this server and their skills** (macOS and Linux; needs git, Python 3.9 or later and, for the skills and adding the MCP server to agents, Node.js 18 or later):
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/main/setup.sh)
@@ -86,12 +86,12 @@ The same `setup.sh` is in all three repositories. It asks a few questions, then 
 1. **Which repositories**: a table of the three, with what each does and the skill it installs; type numbers separated by commas (for example `1,3`) or `all` (the default).
 2. **The MCP server** (only if you pick 3): run it locally (stdio) for your agents, or in Docker over HTTPS, which you install by hand with the [MCP install guide](https://github.com/Crypto-Gi/edgeconnect-mcp/blob/main/docs/install.md), or not at all.
 3. **Which agents**, once, from a table of 20 (Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI, OpenCode, Kilo Code, Kiro CLI, Zed, Windsurf, Cline, Goose, Antigravity, Devin, Roo Code, Continue, Amp, Claude Desktop, and any agent that reads `.agents/skills`). Every picked skill is installed for them, also when it was already installed, and the local MCP server is added to them: through [`add-mcp`](https://www.npmjs.com/package/add-mcp) (without auto-approving tool calls), through `devin mcp add` for Devin, or as a printed config to paste for agents neither covers. Before adding the server it asks to continue, because an existing server named `edgeconnect` in those agents is replaced; with `--yes` it adds the server only when you also pass `--mcp stdio`. It prints each agent's MCP settings file as it goes.
-4. **The install folder** (default: the folder you run it from, or `~/edgeconnect` from your home folder).
+4. **The install folder** (default: `$EDGECONNECT_HOME` if set, else the folder you run it from, or `~/edgeconnect` from your home folder).
 5. **Where the skills and the MCP server go**, one answer for both: only that folder (the default) or your user account (`~`). Agents that keep MCP servers only for the whole user account (Windsurf, Cline, Goose, Antigravity, Claude Desktop) are asked about one by one when you chose the folder: yes adds the server user-wide for that agent, no skips it. With `--yes` they are skipped, and the last screen lists the command to add each one.
 
 Everything lands in the one folder, from `main`: the repositories, for 1 and 2 a Python environment and the `edgeconnect-auto` (1) and `edgeconnect-preconfig` (2) commands in `~/.local/bin`, for a local MCP server its launcher `<folder>/bin/edgeconnect-mcp`, and one shared `.env`. The last screen shows how to fill in `.env` for what you picked: the Orchestrator lines, the API key, a self-signed certificate, `EC_VALIDATORS` for preconfig and MCP writes. It also writes `AGENTS.md` (which tool an agent should use for which task, and what this folder has installed) and a `CLAUDE.md` that points to it, so start your agent there; an `AGENTS.md` that `setup.sh` wrote and you never edited is kept up to date on every run, and one you have edited is never overwritten (the new text goes to `AGENTS.md.new`). Run it again to update. Options for answering without prompts: `--repos 1,3` (or `all`), `--mcp stdio|docker|no`, `--agents 1,2,15` (numbers or names such as `claude-code,codex`), `--dir PATH`, `--skills folder|home`, `--yes`.
 
-Picking 3 in `setup.sh` installs this repository's guide skill, `edgeconnect-guide`, and, if you choose local, the stdio server for your agents; a Docker server is installed by hand, as [Install](#install) below covers.
+Picking 3 in `setup.sh` installs both of this repository's skills, `edgeconnect-guide` and `edgeconnect-report` (it installs every folder under `skills/`), and, if you choose local, the stdio server for your agents; a Docker server is installed by hand, as [Install](#install) below covers. Its launcher `<folder>/bin/edgeconnect-mcp` also runs the reports: `<folder>/bin/edgeconnect-mcp report ...`.
 
 ## Install
 
@@ -116,7 +116,7 @@ On Windows, save [.env.example](.env.example) as `%USERPROFILE%\.edgeconnect-mcp
 
 ### 2. Install
 
-**Claude Code** gets the server and the guide skill in one go:
+**Claude Code** gets the server and both skills in one go:
 
 ```bash
 claude plugin marketplace add Crypto-Gi/edgeconnect-mcp && claude plugin install edgeconnect@edgeconnect-mcp
@@ -128,7 +128,7 @@ claude plugin marketplace add Crypto-Gi/edgeconnect-mcp && claude plugin install
 npx -y github:Crypto-Gi/edgeconnect-mcp
 ```
 
-[docs/clients.md](docs/clients.md) has the ready-made config for each client. Then add the [guide skill](#guide-skill); it asks which agents to add it to:
+[docs/clients.md](docs/clients.md) has the ready-made config for each client. Then add the [guide](#guide-skill) and [report](#report-skill) skills; it asks which agents to add them to:
 
 ```bash
 npx skills add Crypto-Gi/edgeconnect-mcp
@@ -140,12 +140,12 @@ Restart your client and ask "list my EdgeConnect orchestrators". That calls `lis
 
 ```json
 [{"name": "lab", "host": "192.0.2.10", "writes_enabled": false, "passthrough_writes_enabled": false,
-  "write_confirmation": true, "high_risk_allowed": [], "default": true}]
+  "write_confirmation": true, "read_posts_enabled": true, "high_risk_allowed": [], "default": true}]
 ```
 
 Then ask "show the appliances on lab". That one reaches the Orchestrator, so a wrong address, key or certificate shows up there.
 
-The [install guide](docs/install.md) walks through every route the same way, step by step: plugin, npx, uvx, pipx, a clone and Docker, each with its guide-skill command, plus updating and pinning a release. These commands install the latest code on `main`, which only changes through pull requests that pass CI.
+The [install guide](docs/install.md) walks through every route the same way, step by step: plugin, npx, uvx, pipx, a clone and Docker, each with its skills command, the report command for each route, plus updating and pinning a release. These commands install the latest code on `main`, which only changes through pull requests that pass CI.
 
 ## Guide skill
 
@@ -158,31 +158,49 @@ The playbooks are for reference only. Every operation the skill names passed in 
 
 ## Report skill
 
-`skills/edgeconnect-report/` builds six reports: `availability` (monthly service level and path quality), `noc` (what is broken now, last 24 hours and 7 days), `capacity` (WAN links by P95 utilisation), `lifecycle` (software, licences, backups and known security advisories), `incident` (one window: alarms, affected sites, and changes before and during, read live from the audit log) and `executive` (a one-page summary). `edgeconnect-mcp report store` keeps alarms in `~/.edgeconnect-mcp/history/` past the Orchestrator's own 7 days; run it daily from cron or launchd. The audit log is not stored; for a full audit trail use a remote log receiver. Code does the reading and the maths; the assistant only writes the prose, and a validator rejects prose that types a number or contradicts a computed status:
+`skills/edgeconnect-report/` builds six reports: `availability` (monthly service level and path quality), `noc` (what is broken now, last 24 hours and 7 days), `capacity` (WAN links by P95 utilisation), `lifecycle` (software, licences, backups and known security advisories), `incident` (one window of at most 7 days: alarms, affected sites, and changes in it and the 24 hours before, read live from the Orchestrator's audit log, `GET /action`) and `executive` (a one-page summary of the first four). Code does the reading and the maths; the assistant only writes the prose, and a validator rejects prose that types a number or contradicts a computed status:
 
 ```bash
-edgeconnect-mcp report collect --orchestrator lab --report availability --period last-month --out rep   # options: --scope, --target, --down-tunnels
-edgeconnect-mcp report compute rep/bundle.json
+edgeconnect-mcp report collect --orchestrator lab --report availability --period last-month --out rep
+edgeconnect-mcp report compute rep/bundle.json        # writes rep/metrics.json
 edgeconnect-mcp report template rep/metrics.json      # sections, statuses and metric ids for the prose
 edgeconnect-mcp report validate rep/metrics.json rep/narrative.json
 edgeconnect-mcp report render rep/metrics.json rep/narrative.json --out rep/report.html
 ```
 
-`collect` uses the server's own code and `.env`, so the allowlist, redaction, audit log and `get_only` apply; on a GET-only Orchestrator it uses GET alternatives and lists what it could not fetch. The HTML is one file with inline CSS and SVG, no scripts, and prints on A4. Security advisories have no API, so they come from a dated list in `src/edgeconnect_mcp/advisories.py`, and the report says how old it is.
+`collect` takes only these options:
+
+| Option | Values |
+|---|---|
+| `--report` | `availability`, `noc`, `capacity`, `lifecycle`, `incident`, `executive` |
+| `--period` | `last-month` (default) or `month-to-date`; or `--month YYYY-MM` |
+| `--scope` | `all` (default), or comma-separated nePks or host names |
+| `--target` | `orchestrator` (default: its configured thresholds), `99.5`, `99.9` or `99.99` |
+| `--down-tunnels` | `include` (default) or `separate` |
+| `--top` | capacity: how many of the busiest WAN links get an hourly P95 read (default 20) |
+| `--from`, `--to` or `--alarm-id` | incident only, and required for it: an ISO window (UTC unless it says otherwise), or one alarm |
+| `--history` | the alarm archive (default `~/.edgeconnect-mcp/history`) |
+| `--dotenv` | the settings file (default `$EDGECONNECT_DOTENV`, else `~/.edgeconnect-mcp/.env`, else `./.env`) |
+
+`collect` uses the server's own code and `.env`, so the allowlist, redaction, rate limits, audit log and `get_only` apply; on a GET-only Orchestrator it uses GET alternatives and lists what it could not fetch. `render` checks the narrative again and refuses one that fails. The HTML is one file with inline CSS and SVG, no scripts, and prints on A4. Security advisories have no API, so they come from a dated list in `src/edgeconnect_mcp/advisories.py`, and the report says how old it is.
+
+The Orchestrator keeps 7 days of alarms. `edgeconnect-mcp report store --orchestrator lab` keeps them longer, in `~/.edgeconnect-mcp/history/<nickname>/` (or `--history PATH`), for the availability and incident reports. Only alarms are stored: stats are read live, and the Orchestrator's audit log is not stored (a busy one logs thousands of entries an hour); for a full audit trail, send it to a remote log receiver. Nothing is scheduled for you: run `store` daily from cron or launchd.
+
+`report` comes first, or right after `--dotenv <file>`, which `collect` and `store` then use (that is how `setup.sh`'s `<folder>/bin/edgeconnect-mcp report ...` works). Where `edgeconnect-mcp` is not on PATH, use `npx -y github:Crypto-Gi/edgeconnect-mcp report ...`, or in a clone `PYTHONPATH=src python3 -m edgeconnect_mcp report ...`.
 
 ## Safety model
 
 - **Read-only by default.** `api_write` is refused unless `.env` has `<nickname>_mcp_writes=true` for that Orchestrator. Turn it on only for lab Orchestrators, or deliberately.
-- **Three read-only POSTs, and nothing else.** `api_read_post` accepts exactly `POST /alarm/appliance`, `POST /stats/aggregate/interface` and `POST /health` (the `READ_POSTS` list in `server.py`); every other POST stays a write. `<nickname>_mcp_get_only=true` turns them off for an Orchestrator.
+- **Three read-only POSTs, and nothing else.** `api_read_post` accepts exactly `POST /alarm/appliance`, `POST /stats/aggregate/interface` and `POST /health` (the `READ_POSTS` list in `server.py`); every other POST stays a write. They need no write settings and no confirmation, count against the read rate limit, and are audited with method `POST`. `<nickname>_mcp_get_only=true` turns them off for an Orchestrator; `list_orchestrators` shows this as `read_posts_enabled`.
 - **Raw passthroughs need a second opt-in.** `/appliance/rest` and `/broadcastCli` forward any request to an appliance's own API or CLI, so the spec cannot limit what they change. Writes through them also need `<nickname>_mcp_passthrough=true`.
 - **Spec allowlist.** Every call must match a method and path in the spec the Orchestrator serves (`/gms/rest/apiDocs`, the same one Support > REST APIs shows). Undocumented paths, `..`, encoded separators and anything that would leave `/gms/rest` are rejected.
 - **Separate read and write tools.** `api_write` is marked destructive, so MCP clients ask before each call; reads can be auto-approved.
 - **Two-step writes, on by default.** The first `api_write` call sends nothing: it returns the exact change and a one-time code. The assistant shows you the change and, only after your yes, repeats the identical call with the code. A code works once, for 10 minutes, for that exact request and for the client it was issued to. Set `<nickname>_mcp_confirm_writes=false` to turn it off for an Orchestrator, for example for trusted unattended automation.
 - **High-risk blocklist.** Even with writes on, whole categories of dangerous writes are refused. See [below](#high-risk-blocklist).
 - **Secret redaction.** API keys are only sent as the `X-Auth-Token` header, and secrets in responses are replaced with restorable tokens. See [below](#secret-redaction).
-- **Rate limits per Orchestrator.** Reads default to 10 per second and writes to 2 per second, each with a burst of twice that. Over the limit, calls wait rather than fail, so scripts slow down instead of breaking.
+- **Rate limits per Orchestrator.** Reads (GETs and the three read-only POSTs) default to 10 per second and writes to 2 per second, each with a burst of twice that. Over the limit, calls wait rather than fail, so scripts slow down instead of breaking.
 - **Audit trail.** Every tool call is appended as one JSON line to `~/.edgeconnect-mcp/audit.jsonl` (file 0600, folder 0700).
-  - Each record has the UTC timestamp and weekday, session and call id, client address, tool, Orchestrator, method, path, what the operation does (its API summary), redacted query, outcome, error, duration and response size. Writes also record the step (`awaiting_confirmation`, `confirmed` or `executed`) and the request body.
+  - Each record has the UTC timestamp and weekday, session and call id, client address, tool, Orchestrator, method, path, what the operation does (its API summary), redacted query, outcome, error, duration and response size. Writes also record the step (`awaiting_confirmation`, `confirmed` or `executed`) and the request body; `api_read_post` calls record method `POST` and their body. The reads `report collect` and `report store` make go to the same log.
   - Secrets never reach it: bodies hold `<REDACTED:…>` tokens, and anything typed in clear under a secret-named key is masked.
   - Optionally the same records also go to a syslog server (`mcp_audit_syslog`) and a SQLite database (`mcp_audit_sqlite`).
   - In HTTP mode, requests turned away for a wrong token, client address or origin are logged too (`tool` is `http_refused`, with the client address, the proxy it came through as `peer`, and the reason, such as `missing access token` or `wrong access token`; never the token).
@@ -213,7 +231,7 @@ These writes are refused unless `<nickname>_mcp_allow_high_risk` names their cat
 | `ip_allowlist` | IP allowlist |
 | `traffic_disruptive` | Network memory erase, flow reset, DHCP config reset |
 
-Punctuation is ignored when matching (`edge-ha` = `edgeha`), and passthrough writes are also checked against their `url`. Plain lookups stay allowed in the certificate, licensing, upgrade, auth and backup areas: an operation named `validate…`, `check…` or `parse…`, or one whose summary starts with validate, verify, check or parse.
+Punctuation is ignored when matching (`edge-ha` = `edgeha`), and passthrough writes are also checked against their `url`. Plain lookups stay allowed in the certificate, licensing, upgrade, auth and backup areas: an operation whose last path segment starts with a lookup word such as `validate`, `check`, `parse`, `verify`, `lookup`, `list`, `get`, `preview` or `test` (or ends in `connectivity`), or one whose summary starts with validate, verify, check, parse, test connect or get. In the provisioning area only the path name counts.
 
 To see exactly what the list refuses on one Orchestrator:
 
@@ -223,7 +241,7 @@ npx -y github:Crypto-Gi/edgeconnect-mcp --list-high-risk lab
 
 ### Secret redaction
 
-String values under keys such as `apiKey`, `password`, `token`, `presharedKey`, `authKey`, `privateKey`, `accountKey` and `rocommunity`, and any PEM private key, come back as `<REDACTED:…>` tokens. Redaction goes by field name. The names were checked against every property in the 9.7.1 API spec that is described as a password, secret, key, community string or credential; a test covers a list of them, but it does not read the spec itself, so a field added in a later release can slip through. Flags and numbers (`passwordMinLen`, `csrfProtection`) stay readable.
+String values under keys such as `apiKey`, `password`, `token`, `presharedKey`, `authKey`, `privateKey`, `accountKey`, `licenseKey` and `rocommunity`, and any PEM private key, come back as `<REDACTED:…>` tokens. Redaction goes by field name. The names were checked against every property in the 9.7.1 API spec that is described as a password, secret, key, community string or credential; a test covers a list of them, but it does not read the spec itself, so a field added in a later release can slip through. Flags and numbers (`passwordMinLen`, `csrfProtection`) stay readable.
 
 Write a token back unchanged and the server puts the real value in, so read-modify-write of BGP, OSPF, overlays or tunnels round-trips exactly. A token is only restored under the same key it was read from, on the same API path or a parent or child of it (for appliance passthrough, the same `url`), on the same Orchestrator, during the same server run. Anything else is refused: a plain `<REDACTED>`, a token moved into a readable field or another feature's secret field, or a token from another Orchestrator or an earlier run. So a secret can never be overwritten with a placeholder or copied somewhere it could leak.
 
@@ -250,7 +268,7 @@ lab_tls_sha256=<SHA-256 fingerprint>
 | `<nickname>_mcp_writes` | off | `true` allows `api_write` |
 | `<nickname>_mcp_passthrough` | off | `true` also allows writes through `/appliance/rest` and `/broadcastCli` |
 | `<nickname>_mcp_confirm_writes` | on | `false` turns off two-step writes for that Orchestrator |
-| `<nickname>_mcp_get_only` | off | `true` refuses `api_read_post` too, so only GETs reach that Orchestrator (for read-only keys) |
+| `<nickname>_mcp_get_only` | off | `true` refuses `api_read_post`, so with writes also off only GETs reach that Orchestrator (for keys that must only see GETs); it does not change `api_write` |
 | `<nickname>_mcp_allow_high_risk` | none | Blocklist categories to allow, comma-separated, or `all` |
 | `<nickname>_mcp_read_rate` | `10` | Reads per second, `0` = no limit |
 | `<nickname>_mcp_write_rate` | `2` | Writes per second, `0` = no limit |

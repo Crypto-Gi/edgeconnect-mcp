@@ -1,5 +1,5 @@
 # HTTP mode in a container. Put mcp_http_token, mcp_http_allowed_clients and (behind a proxy)
-# mcp_http_trusted_proxies in .env; see the README section "Run in a container".
+# mcp_http_trusted_proxies in .env; see "Run in a container" in docs/remote-access.md.
 services:
   edgeconnect-mcp:
     build: .

@@ -649,9 +649,15 @@ HOME_DOTENV = Path.home() / ".edgeconnect-mcp" / ".env"
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if argv[:1] == ["report"]:
+    # `report` may follow the --dotenv that setup.sh's launcher always passes; collect and store take it from the environment.
+    rest = argv
+    if rest[:1] == ["--dotenv"] and len(rest) > 2 and rest[2] == "report":
+        os.environ["EDGECONNECT_DOTENV"], rest = rest[1], rest[2:]
+    elif rest[:1] and rest[0].startswith("--dotenv=") and rest[1:2] == ["report"]:
+        os.environ["EDGECONNECT_DOTENV"], rest = rest[0].split("=", 1)[1], rest[1:]
+    if rest[:1] == ["report"]:
         from .report import main as report_main
-        return report_main(argv[1:])
+        return report_main(rest[1:])
     parser = argparse.ArgumentParser(prog="edgeconnect-mcp", description="MCP server for EdgeConnect Orchestrator (stdio, or local HTTP with --http)")
     parser.add_argument("--dotenv", default=os.environ.get("EDGECONNECT_DOTENV"), help="path to the .env file (default: $EDGECONNECT_DOTENV, else ~/.edgeconnect-mcp/.env, else ./.env)")
     parser.add_argument("--list-high-risk", metavar="NICKNAME", help="print every write operation in that Orchestrator's spec that the high-risk blocklist refuses, then exit")
