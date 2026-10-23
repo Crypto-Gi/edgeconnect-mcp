@@ -239,6 +239,22 @@ class McpServerTest(unittest.TestCase):
         dotenv.write_text("orch_1=a\na_base_url=https://192.0.2.1\na_api_key=k\na_mcp_get_only=true\norch_2=b\nb_base_url=https://192.0.2.2\nb_api_key=k\nmcp_audit_log=off\n")
         self.assertEqual({name: o.get_only for name, o in Server.from_dotenv(str(dotenv)).orchestrators.items()}, {"a": True, "b": False})
 
+    def test_get_only_refuses_api_write_even_with_writes_on(self):
+        lab = self.server.orchestrators["lab"]  # writes on
+        lab.confirm_writes = True
+        write = dict(orchestrator="lab", method="POST", path="/ipObjects/addressGroup", body={"name": "g"})
+        code = json.loads(self.call("api_write", **write)[1])["confirmation"]  # issued before get_only
+        lab.get_only = True
+        for arguments in (write, dict(write, confirmation=code)):  # the preview step and a confirmed call
+            error, text = self.call("api_write", **arguments)
+            self.assertTrue(error)
+            self.assertIn("lab_mcp_get_only=true", text)
+        lab.confirm_writes = False
+        self.assertIn("lab_mcp_get_only=true", self.call("api_write", **write)[1])
+        self.assertEqual(self.lab_client.calls, [])
+        listed = {o["name"]: o for o in json.loads(self.call("list_orchestrators")[1])}
+        self.assertEqual((listed["lab"]["writes_enabled"], listed["lab"]["read_posts_enabled"]), (False, False))
+
     def test_list_orchestrators_never_shows_keys(self):
         error, text = self.call("list_orchestrators")
         self.assertFalse(error)

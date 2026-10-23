@@ -34,7 +34,7 @@ It reads the same `.env` format as [edgeconnect-orchestrator-automation](https:/
 | `describe_operation` | Parameters and request-body schema for one operation. |
 | `api_get` | Any documented GET. |
 | `api_read_post` | Only the three read-only POST queries the API has no GET for: `/alarm/appliance` (appliance alarms), `/stats/aggregate/interface` (interface totals) and `/health` (hourly health). Allowed with writes off, without confirmation, on the read rate limit, and audited as `POST`. Refused where `<nickname>_mcp_get_only=true`. |
-| `api_write` | Any documented POST, PUT, PATCH or DELETE, only on Orchestrators with writes enabled. |
+| `api_write` | Any documented POST, PUT, PATCH or DELETE, only on Orchestrators with writes enabled. Refused where `<nickname>_mcp_get_only=true`, even with writes on. |
 
 Paths are relative to `/gms/rest`, for example `/appliance` or `/gms/versions`. Responses are truncated to `max_chars` (default 60,000) so one call cannot flood the conversation.
 
@@ -192,6 +192,7 @@ The Orchestrator keeps 7 days of alarms. `edgeconnect-mcp report store --orchest
 
 - **Read-only by default.** `api_write` is refused unless `.env` has `<nickname>_mcp_writes=true` for that Orchestrator. Turn it on only for lab Orchestrators, or deliberately.
 - **Three read-only POSTs, and nothing else.** `api_read_post` accepts exactly `POST /alarm/appliance`, `POST /stats/aggregate/interface` and `POST /health` (the `READ_POSTS` list in `server.py`); every other POST stays a write. They need no write settings and no confirmation, count against the read rate limit, and are audited with method `POST`. `<nickname>_mcp_get_only=true` turns them off for an Orchestrator; `list_orchestrators` shows this as `read_posts_enabled`.
+- **GET-only means GET-only.** `<nickname>_mcp_get_only=true` also refuses every `api_write`, even with `<nickname>_mcp_writes=true`, so only GETs reach that Orchestrator; `list_orchestrators` then shows `writes_enabled` and `passthrough_writes_enabled` false.
 - **Raw passthroughs need a second opt-in.** `/appliance/rest` and `/broadcastCli` forward any request to an appliance's own API or CLI, so the spec cannot limit what they change. Writes through them also need `<nickname>_mcp_passthrough=true`.
 - **Spec allowlist.** Every call must match a method and path in the spec the Orchestrator serves (`/gms/rest/apiDocs`, the same one Support > REST APIs shows). Undocumented paths, `..`, encoded separators and anything that would leave `/gms/rest` are rejected.
 - **Separate read and write tools.** `api_write` is marked destructive, so MCP clients ask before each call; reads can be auto-approved.
@@ -268,7 +269,7 @@ lab_tls_sha256=<SHA-256 fingerprint>
 | `<nickname>_mcp_writes` | off | `true` allows `api_write` |
 | `<nickname>_mcp_passthrough` | off | `true` also allows writes through `/appliance/rest` and `/broadcastCli` |
 | `<nickname>_mcp_confirm_writes` | on | `false` turns off two-step writes for that Orchestrator |
-| `<nickname>_mcp_get_only` | off | `true` refuses `api_read_post`, so with writes also off only GETs reach that Orchestrator (for keys that must only see GETs); it does not change `api_write` |
+| `<nickname>_mcp_get_only` | off | `true` refuses `api_read_post` and `api_write` (even with `_mcp_writes=true`), so only GETs reach that Orchestrator (for keys that must only see GETs) |
 | `<nickname>_mcp_allow_high_risk` | none | Blocklist categories to allow, comma-separated, or `all` |
 | `<nickname>_mcp_read_rate` | `10` | Reads per second, `0` = no limit |
 | `<nickname>_mcp_write_rate` | `2` | Writes per second, `0` = no limit |
