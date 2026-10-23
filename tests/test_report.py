@@ -789,8 +789,10 @@ class ReviewRound4Tests(unittest.TestCase):
 
     def test_plural_and_fractional_number_words(self):
         metrics = report.compute(bundle())
-        for text in ("Thousands of alarms were raised.", "A third of the sites.", "Traffic doubled, then triple."):
+        for text in ("Thousands of alarms were raised.", "Traffic doubled.", "It tripled.", "Two halves."):
             self.assertIn("bare number", " ".join(report.validate(metrics, {"report": "availability", "sections": {"avail-summary": {"text": text}}})), text)
+        # not figures: third-party tunnels and the last quarter are common EdgeConnect phrases
+        self.assertEqual(report.validate(metrics, {"report": "availability", "sections": {"avail-summary": {"text": "Third-party tunnels were stable last quarter."}}}), [])
 
     def test_merged_archive_alarms_do_not_trip_the_cap_gap_and_expiry_counts_need_dates(self):
         m = report.compute(bundle(appliance_alarms=[{"applianceId": "1.NE", "severity": "MINOR"}] * 3, appliance_alarms_capped=False))

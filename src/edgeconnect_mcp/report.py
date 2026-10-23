@@ -84,7 +84,7 @@ _STATUS_WORDS = {"green": ("healthy", "on target", "meets target", "met target",
 MAX_TEXT = 1200
 # Figures written as words are figures too.
 _NUMBER_WORDS = re.compile(r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
-                           r"eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|thousands?|millions?|dozens?|half|twice|double|triple|third|quarter|"
+                           r"eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|thousands?|millions?|dozens?|half|halves|twice|doubled?|tripled?|"
                            r"percent)\b", re.I)
 # Digits that are names, not figures: P95, the 24-hour and 7-day windows, software releases.
 _FIXED_TERMS = re.compile(r"\bP\d{2}\b|\blast (?:24 hours|7 days)\b|\b(?:ECOS|release|version|Orchestrator)\s+\d+(?:\.\d+)+\b", re.I)
