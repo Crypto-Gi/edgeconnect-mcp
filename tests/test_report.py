@@ -341,5 +341,53 @@ class Phase2CollectTests(CollectTests):
         self.assertEqual([c[2] for c in client.calls if c[1] == "/tunnels2/bonded"], [{"operStatus": "true", "srcNePk": "true", "alias": "true", "tag": "true"}])
 
 
+class PresentationTests(unittest.TestCase):
+    def executive(self, down=1, total=12, **data):
+        inventory = [{"nePk": "{}.NE".format(i), "hostName": "site-{}".format(i), "state": 2 if i < down else 1, "softwareVersion": "9.7.1.0_1"} for i in range(total)]
+        b = phase2_bundle("executive", appliances=inventory, **data)
+        return report.compute(b)
+
+    def test_fleet_is_amber_with_any_appliance_down_and_red_above_ten_percent(self):
+        self.assertEqual([self.executive(down=d)["sections"]["exec-fleet"]["status"] for d in (0, 1, 2)], ["green", "amber", "red"])  # 0, 8.3%, 16.7% down
+        self.assertNotIn("table", self.executive()["sections"]["exec-fleet"])  # the appliance list lives in the availability and NOC reports
+
+    def test_executive_verdict_and_kpi_strip(self):
+        m = self.executive(down=1, alarm_summary={"numOfCriticalAlarms": 2, "numOfMajorAlarms": 0, "numOfMinorAlarms": 0, "numOfWarningAlarms": 0})
+        self.assertEqual(m["headline"]["status"], "red")
+        self.assertTrue(m["headline"]["text"].startswith("Overall: Red. Attention needed in Fleet"))
+        self.assertIn("Active alarms", m["headline"]["text"])
+        self.assertEqual(m["headline"]["kpis"], list(report.EXEC_KPIS))
+        page = report.render(m)
+        self.assertLess(page.index('data-section-id="verdict"'), page.index('data-section-id="exec-fleet"'))
+        self.assertIn('data-section-id="kpi-strip"', page)
+        self.assertIsNone(report.compute(bundle())["headline"])  # only the executive page has one
+
+    def test_availability_summary_follows_availability_not_alarms(self):
+        m = report.compute(bundle(appliance_alarms=[{"applianceId": "1.NE", "severity": "CRITICAL"}]))
+        self.assertEqual((m["sections"]["avail-alarms"]["status"], m["sections"]["avail-summary"]["status"]), ("red", "amber"))
+
+    def test_tunnels_down_all_period_are_listed_apart_and_left_out_and_the_table_keeps_the_worst_25(self):
+        overlay = {"1": [{"count": 1000, "tunnel_state": 0, "blackout": 0, "brownout": 0},
+                         {"count": 1000, "tunnel_state": 60000, "blackout": 60000, "brownout": 0, "label": "INET", "serviceName": "SSE", "tunnelcount": 2}]}
+        m = report.compute(bundle(**{"overlay:1.NE": overlay}))
+        self.assertEqual((m["metrics"]["overlay_avail_pct"]["value"], m["metrics"]["tunnel_groups_down_all_period"]["value"]), (100.0, 2))
+        self.assertIn("branch-a overlay INET SSE (2 tunnels)", " ".join(m["sections"]["avail-tunnels"]["notes"]))
+        many = [{"nePk": "{}.NE".format(i), "hostName": "s{}".format(i), "state": 1} for i in range(30)]
+        data = {"appliances": many}
+        data.update({"overlay:{}.NE".format(i): {"1": [{"count": 100, "tunnel_state": i, "blackout": 0}]} for i in range(30)})
+        m = report.compute(bundle(**data))
+        self.assertEqual(len(m["sections"]["avail-tunnels"]["table"]), 25)
+        self.assertIn("Worst 25 shown; 6 more rows not shown.", m["sections"]["avail-tunnels"]["notes"])  # 30 overlay rows + the fixture's underlay row
+
+    def test_singular_units_status_coloured_bars_and_labelled_axis(self):
+        self.assertEqual(report._fmt({"value": 1, "unit": "alarms"}), "1 alarm")
+        self.assertEqual(report._fmt({"value": 2, "unit": "alarms"}), "2 alarms")
+        svg = report._chart({"title": "t", "zoom": True, "points": [("a", 95.0, "red"), ("b", 100.0, "green")]})
+        self.assertIn('class="bar red"', svg)
+        self.assertIn('class="bar green"', svg)
+        self.assertIn("Scale 90% to 100% (zoomed)", svg)
+        self.assertIn("Scale 0% to 100%", report._chart({"title": "t", "zoom": False, "points": [("a", 5.0, "green")]}))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,8 +40,12 @@ SECTIONS = {
                   ("exec-licensing", "Licensing"), ("exec-software", "Software versions"), ("exec-capacity", "WAN capacity"),
                   ("exec-noc", "NOC digest"), ("exec-lifecycle", "Lifecycle and vulnerabilities"), ("data-gaps", "Data gaps")),
 }
+ALWAYS_DOWN = 0.99  # a tunnel group up less than 1% of the period counts as down for the whole period: listed apart, not averaged in
 TITLES = {"availability": "Availability report", "noc": "NOC digest", "capacity": "WAN capacity report",
           "lifecycle": "Lifecycle, licence and vulnerability report", "executive": "Executive summary"}
+# The executive page's KPI strip: availability, overlays, sites below target, critical alarms, licence, capacity, NOC, advisories.
+EXEC_KPIS = ("fleet_reach_pct", "overlay_avail_pct", "appliances_below_target", "active_critical", "license_days_left", "worst_p95_pct",
+             "sites_needing_attention", "advisory_hits")
 PARTS = {"executive": ("availability", "noc", "capacity", "lifecycle")}  # reports that combine others; the rest are themselves
 STATE_NAMES = {1: "normal", 2: "unreachable", 3: "unsupported", 4: "out of sync", 5: "syncing"}  # GET /appliance `state`
 GOOD_HEALTH = ("HEALTHY",)  # POST /health hourly `status` that counts as good; the spec enum is HEALTHY, WARNING, MINOR, MAJOR, CRITICAL
@@ -224,17 +228,23 @@ def _pct(part: float, whole: float) -> Optional[float]:
     return round(100.0 * part / whole, 3) if whole else None
 
 
-def _tunnel_totals(value: Any) -> Dict[str, float]:
-    """Seconds sampled, down and degraded. `count` is minute samples while tunnel_state, blackout and brownout are seconds
-    (seen on 9.7.1 and 10.0: count 1441 for a day, downtime up to count x 60); tunnel_state and blackout overlap, so take the larger."""
-    totals = {"seconds": 0.0, "down": 0.0, "brownout": 0.0}
+def _tunnel_totals(value: Any) -> Dict[str, Any]:
+    """Seconds sampled, down and degraded, plus the groups down for the whole period, up under 1% of it (kept apart, not in the totals).
+
+    `count` is minute samples while tunnel_state, blackout and brownout are seconds (seen on 9.7.1 and 10.0: count 1441 for a
+    day, downtime up to count x 60); tunnel_state and blackout overlap, so take the larger."""
+    totals: Dict[str, Any] = {"seconds": 0.0, "down": 0.0, "brownout": 0.0, "always_down": []}
     groups = value.values() if isinstance(value, dict) else [value] if isinstance(value, list) else []
     for group in groups:
         for row in group if isinstance(group, list) else []:
             if isinstance(row, dict):
                 seconds = 60.0 * float(row.get("count") or 0)
+                down = min(seconds, max(float(row.get("tunnel_state") or 0), float(row.get("blackout") or 0)))
+                if seconds and down >= ALWAYS_DOWN * seconds:
+                    totals["always_down"].append(row)
+                    continue
                 totals["seconds"] += seconds
-                totals["down"] += min(seconds, max(float(row.get("tunnel_state") or 0), float(row.get("blackout") or 0)))
+                totals["down"] += down
                 totals["brownout"] += min(seconds, float(row.get("brownout") or 0))
     return totals
 
@@ -343,13 +353,12 @@ def compute(bundle: Mapping[str, Any]) -> Dict[str, Any]:
 
     if report == "executive":
         reachable_now = [a for a in inventory if a.get("state") == 1]
-        share = _pct(len(reachable_now), len(inventory))
-        limits, _ = _limits(data.get("availability_threshold") or {}, "reachability")
-        m_now = metric("reachable_now_pct", share, "%", "Appliances reachable at collection time", band(share, limits))
+        down_share = _pct(len(inventory) - len(reachable_now), len(inventory))
+        fleet_status = "grey" if down_share is None else "green" if not down_share else "red" if down_share > 10 else "amber"
+        m_now = metric("reachable_now_pct", _pct(len(reachable_now), len(inventory)), "%", "Appliances reachable at collection time", fleet_status)
         metric("reachable_now", len(reachable_now), "appliances", "Appliances reachable at collection time")
-        sections["exec-fleet"] = {"status": metrics[m_now]["status"], "metrics": [m_total, "reachable_now", m_now],
-                                  "table": [{"appliance": a.get("hostName"), "model": a.get("model"), "ecos": a.get("softwareVersion"), "reachable": "yes" if a.get("state") == 1 else "no"}
-                                            for a in sorted(inventory, key=lambda a: (a.get("state") == 1, str(a.get("hostName"))))][:40]}
+        sections["exec-fleet"] = {"status": fleet_status, "metrics": [m_total, "reachable_now", m_now],
+                                  "notes": ["Rule: any appliance down is amber; more than 10% down is red. The appliance list is in the availability and NOC reports."]}
         sections["exec-availability"] = {"status": worst([sections["avail-appliances"]["status"], sections["avail-tunnels"]["status"]]),
                                          "metrics": ["fleet_reach_pct", "overlay_avail_pct", "underlay_avail_pct", "appliances_below_target"]}
         sections["exec-alarms"] = dict(sections["noc-alarms"], table=[])
@@ -360,6 +369,13 @@ def compute(bundle: Mapping[str, Any]) -> Dict[str, Any]:
         sections["exec-noc"] = {"status": sections["noc-summary"]["status"], "metrics": sections["noc-summary"]["metrics"]}
         sections["exec-lifecycle"] = {"status": sections["life-summary"]["status"], "metrics": sections["life-summary"]["metrics"]}
     sections["data-gaps"] = {"status": "grey" if gaps else "green", "metrics": [], "notes": gaps or ["None: every call returned data."]}
+    headline = None
+    if report == "executive":
+        areas = [sid for sid, _ in SECTIONS[report] if sid != "data-gaps"]
+        overall = worst([sections[sid]["status"] for sid in areas])
+        attention = [dict(SECTIONS[report])[sid] for sid in areas if sections[sid]["status"] in ("amber", "red")]
+        headline = {"status": overall, "kpis": [k for k in EXEC_KPIS if k in metrics],
+                    "text": "Overall: {}. {}.".format(overall.title(), "No area needs attention" if not attention else "Attention needed in " + ", ".join(attention))}
 
     # An appliance counts as covered when any per-appliance read returned something for it (keyed "<what>:<nePk>", or named inside a result).
     other = json.dumps({k: v for k, v in data.items() if k not in ("appliances", "versions") and ":" not in k})
@@ -368,7 +384,7 @@ def compute(bundle: Mapping[str, Any]) -> Dict[str, Any]:
             "orchestrator_version": (data.get("versions") or {}).get("current") if isinstance(data.get("versions"), dict) else None,
             "period": bundle["period"], "collected_at": bundle["collected_at"], "bundle_sha256": bundle.get("sha256"),
             "coverage": {"appliances": len(names), "with_data": answered}, "stats_store_down": stats_down,
-            "metrics": metrics, "sections": {sid: sections[sid] for sid, _ in SECTIONS[report]}}
+            "headline": headline, "metrics": metrics, "sections": {sid: sections[sid] for sid, _ in SECTIONS[report]}}
 
 
 def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -401,7 +417,7 @@ def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                                                              "points": [(r["appliance"], r["value"], r["status"]) for r in rows if r["value"] is not None][:25]}}
 
     # Tunnel availability, derived: 1 - down seconds / sampled seconds; brownout is shown as a degraded share.
-    tunnel_metrics, tunnel_rows, tunnel_status = [], [], []
+    tunnel_metrics, tunnel_rows, tunnel_status, always_down = [], [], [], []
     for kind, key, label in (("overlay", "overlayAvailability", "Overlay"), ("underlay", "underlayAvailability", "Underlay")):
         lim, _ = _limits(threshold, key)
         totals = {"seconds": 0.0, "down": 0.0, "brownout": 0.0}
@@ -409,6 +425,8 @@ def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
             t = _tunnel_totals(data.get("{}:{}".format(kind, ne)))
             for k in totals:
                 totals[k] += t[k]
+            for row in t["always_down"]:
+                always_down.append({"appliance": name, "kind": label, "label": row.get("label"), "service": row.get("serviceName"), "tunnels": row.get("tunnelcount")})
             if t["seconds"]:
                 pct = _pct(t["seconds"] - t["down"], t["seconds"])
                 tunnel_rows.append({"appliance": name, "kind": label, "value": pct, "degraded_pct": _pct(t["brownout"], t["seconds"]), "status": band(pct, lim)})
@@ -417,8 +435,16 @@ def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         tunnel_metrics += [metric(kind + "_avail_pct", pct, "%", label + " tunnel availability (derived)", band(pct, lim)),
                            metric(kind + "_degraded_pct", _pct(totals["brownout"], totals["seconds"]), "%", label + " brownout share")]
     tunnel_rows.sort(key=lambda r: (r["value"] is None, r["value"] or 0))
-    sections["avail-tunnels"] = {"status": worst(tunnel_status), "metrics": tunnel_metrics, "table": tunnel_rows,
-                                 "notes": ["Derived from the Orchestrator's tunnel availability data as 1 - downtime / time sampled (samples are minutes, downtime is seconds); brownout is reported separately."]}
+    notes = ["Derived from the Orchestrator's tunnel availability data as 1 - downtime / time sampled (samples are minutes, downtime is seconds); brownout is reported separately."]
+    if len(tunnel_rows) > 25:
+        notes.append("Worst 25 shown; {} more rows not shown.".format(len(tunnel_rows) - 25))
+    tunnel_metrics.append(metric("tunnel_groups_down_all_period", sum(int(r["tunnels"] or 1) for r in always_down), "tunnels", "Tunnels down for the whole period (not in the figures)"))
+    if always_down:
+        notes.append("Down for the whole period (up less than 1% of it), so left out of the figures above; often unused or decommissioned paths: "
+                     + "; ".join(" ".join([r["appliance"], r["kind"].lower()] + [str(x) for x in (r["label"], r["service"]) if x and x not in ("none", "unassigned")]
+                                          + ["({} tunnel{})".format(r["tunnels"], "" if r["tunnels"] == 1 else "s")]) for r in always_down[:25])
+                     + ("; and {} more".format(len(always_down) - 25) if len(always_down) > 25 else "") + ".")
+    sections["avail-tunnels"] = {"status": worst(tunnel_status), "metrics": tunnel_metrics, "table": tunnel_rows[:25], "notes": notes}
 
     # Alarms raised in the period: the full list if the read POST ran, otherwise per-appliance counts (GET).
     counts = {"CRITICAL": 0, "MAJOR": 0, "MINOR": 0, "WARNING": 0}
@@ -445,7 +471,7 @@ def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     sections["avail-alarms"] = {"status": alarm_status, "metrics": alarm_ids, "table": alarm_rows, "notes": ["Source: " + source + "."]}
 
     availability_status = worst([sections["avail-appliances"]["status"], sections["avail-tunnels"]["status"]])
-    sections["avail-summary"] = {"status": worst([availability_status, alarm_status]), "metrics": [m_fleet, "overlay_avail_pct", "underlay_avail_pct", "alarms_critical", "appliances_total"]}
+    sections["avail-summary"] = {"status": availability_status, "metrics": [m_fleet, "overlay_avail_pct", "underlay_avail_pct", "alarms_critical", "appliances_total"]}
     return sections
 
 
@@ -747,10 +773,12 @@ main{max-width:980px;margin:0 auto;padding:24px 16px}h1{font-size:24px;margin:0 
 .kpis{display:flex;flex-wrap:wrap;gap:12px;margin:8px 0}.kpi{border:1px solid var(--line);border-radius:6px;padding:8px 12px;min-width:150px}
 .kpi b{display:block;font-size:20px}.kpi span{color:var(--muted);font-size:12px}
 table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}th,td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
-svg{width:100%;height:auto;margin-top:8px}svg text{fill:var(--fg);font-size:11px}svg rect.bar{fill:var(--bar)}
+svg{width:100%;height:auto;margin-top:8px}svg text{fill:var(--fg);font-size:11px}svg rect.bar{fill:var(--bar)}svg rect.bar.green{fill:var(--green)}svg rect.bar.amber{fill:var(--amber)}svg rect.bar.red{fill:var(--red)}svg text.axis{fill:var(--muted)}
+.verdict{border:2px solid currentColor;border-radius:8px;padding:12px 16px;margin:16px 0;font-weight:600}
 @media print{@page{size:A4;margin:14mm}:root{--bg:#fff;--fg:#111;--muted:#555;--card:#fff;--line:#ccc;--green:#1a7f37;--amber:#9a6700;--red:#cf222e;--grey:#57606a;--bar:#0969da}main{max-width:none;padding:0}}
 </style></head><body><main>
 <header><h1>$title</h1><div class="meta">$subtitle</div></header>
+$headline
 $banner
 $sections
 <footer><p>Orchestrator $orchestrator, release $version. Data collected $collected for $period. Coverage: $coverage. Bundle SHA-256 $bundle. Generated by edgeconnect-mcp $generator; numbers and statuses are computed by code, the prose only cites them.</p></footer>
@@ -766,6 +794,8 @@ def _fmt(metric: Mapping[str, Any], unit_word: bool = True) -> str:
     if isinstance(value, float):
         value = "{:.2f}".format(value)
     unit = metric.get("unit") or ""
+    if value == 1 and unit.endswith("s"):
+        unit = unit[:-1]  # 1 alarm, 1 appliance
     return "{}{}".format(value, unit if unit == "%" else (" " + unit if unit and unit_word else ""))
 
 
@@ -778,12 +808,16 @@ def _chart(chart: Mapping[str, Any]) -> str:
     floor, ceiling = (min(90.0, min(values)), 100.0) if chart.get("zoom") else (0.0, max(100.0, max(values)))
     width, row = 640, 18
     bars = []
-    for i, (label, value) in enumerate((p[0], p[1]) for p in points):
+    top = 16  # room for the axis label
+    bars = ['<text x="200" y="11" class="axis">Scale {:g}% to {:g}%{}</text>'.format(floor, ceiling, " (zoomed)" if floor > 0 else "")]
+    for i, point in enumerate(points):
+        label, value = point[0], point[1]
+        status = point[2] if len(point) > 2 and point[2] in STATUSES else ""
         length = 0 if value <= floor else (value - floor) / (ceiling - floor) * (width - 260)
-        y = i * row
-        bars.append('<text x="0" y="{0}">{1}</text><rect class="bar" x="200" y="{2}" width="{3:.1f}" height="12"><title>{1}: {4:.2f}%</title></rect>'
-                    '<text x="{5:.1f}" y="{0}">{4:.2f}%</text>'.format(y + 11, html.escape(str(label)[:28]), y + 1, length, value, 206 + length))
-    return '<svg viewBox="0 0 {} {}" role="img" aria-label="{}"><title>{}</title>{}</svg>'.format(width, len(points) * row + 4, html.escape(title), html.escape(title), "".join(bars))
+        y = top + i * row
+        bars.append('<text x="0" y="{0}">{1}</text><rect class="bar {6}" x="200" y="{2}" width="{3:.1f}" height="12"><title>{1}: {4:.2f}%</title></rect>'
+                    '<text x="{5:.1f}" y="{0}">{4:.2f}%</text>'.format(y + 11, html.escape(str(label)[:28]), y + 1, length, value, 206 + length, status))
+    return '<svg viewBox="0 0 {} {}" role="img" aria-label="{}"><title>{}</title>{}</svg>'.format(width, top + len(points) * row + 4, html.escape(title), html.escape(title), "".join(bars))
 
 
 def _table(rows: List[Mapping[str, Any]]) -> str:
@@ -816,13 +850,19 @@ def render(metrics: Mapping[str, Any], narrative: Optional[Mapping[str, Any]] = 
             sid, html.escape(titles[sid]), sec["status"], sec["status"].title(), "<p>{}</p>".format(text) if text else "", kpis, chart, _table(sec.get("table") or []), notes))
     banner = '<div class="banner" data-section-id="stats-store-down">Statistics store down: every statistics call returned HTTP 500, so availability numbers are missing.</div>' if metrics.get("stats_store_down") else ""
     coverage = metrics.get("coverage") or {}
+    head = metrics.get("headline")
+    headline = ""
+    if head:
+        tiles = "".join('<div class="kpi"><b class="{}">{}</b><span>{}</span></div>'.format(metrics["metrics"][mid].get("status") or "", html.escape(_fmt(metrics["metrics"][mid])), html.escape(metrics["metrics"][mid]["label"]))
+                        for mid in head["kpis"])
+        headline = '<div class="verdict {0}" data-section-id="verdict">{1}</div><div class="kpis" data-section-id="kpi-strip">{2}</div>'.format(head["status"], html.escape(head["text"]), tiles)
     now = metrics["period"].get("now_s")
     as_of = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if now else metrics["collected_at"]
     period = {"noc": "last 24 hours and 7 days to " + as_of, "lifecycle": "as of " + as_of}.get(metrics["report"], metrics["period"]["month"])
     return PAGE.substitute(
         title=html.escape("{}, {}".format(TITLES[metrics["report"]], period)),
         subtitle=html.escape("Orchestrator {} · {}".format(metrics["orchestrator"], period)),
-        banner=banner, sections="\n".join(parts), orchestrator=html.escape(str(metrics["orchestrator"])), version=html.escape(str(metrics.get("orchestrator_version"))),
+        headline=headline, banner=banner, sections="\n".join(parts), orchestrator=html.escape(str(metrics["orchestrator"])), version=html.escape(str(metrics.get("orchestrator_version"))),
         collected=html.escape(str(metrics["collected_at"])), period=html.escape(period),
         coverage=html.escape("{} of {} appliances returned data in a per-appliance read".format(coverage.get("with_data"), coverage.get("appliances"))),
         bundle=html.escape(str(metrics.get("bundle_sha256"))), generator=html.escape(__version__))
