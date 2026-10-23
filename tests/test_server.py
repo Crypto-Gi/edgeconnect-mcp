@@ -159,6 +159,20 @@ class McpServerTest(unittest.TestCase):
         server = Server.from_dotenv(str(dotenv))
         self.assertEqual({name: o.confirm_writes for name, o in server.orchestrators.items()}, {"a": True, "b": False})
 
+    def test_report_runs_after_the_dotenv_the_launcher_passes(self):
+        # setup.sh's bin/edgeconnect-mcp runs `python -m edgeconnect_mcp --dotenv <file> "$@"`, so `report` comes second.
+        from unittest import mock
+        import edgeconnect_mcp.server as server_module
+        with mock.patch("edgeconnect_mcp.report.main", return_value=0) as report_main, mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("EDGECONNECT_DOTENV", None)
+            self.assertEqual(server_module.main(["--dotenv", "/x/.env", "report", "compute", "b.json"]), 0)
+            report_main.assert_called_once_with(["compute", "b.json"])
+            self.assertEqual(os.environ.get("EDGECONNECT_DOTENV"), "/x/.env")  # collect and store read it as their --dotenv default
+            os.environ.pop("EDGECONNECT_DOTENV", None)
+            self.assertEqual(server_module.main(["--dotenv=/y/.env", "report", "collect", "--help"]), 0)
+            self.assertEqual(os.environ.get("EDGECONNECT_DOTENV"), "/y/.env")
+            os.environ.pop("EDGECONNECT_DOTENV", None)
+
     def test_main_prefers_home_settings_file_over_local_env(self):
         from unittest import mock
         import edgeconnect_mcp.server as server_module
