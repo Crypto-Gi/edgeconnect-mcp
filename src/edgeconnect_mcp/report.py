@@ -56,11 +56,11 @@ HOURLY_RETENTION = 14 * 86400  # fallback when GET /gms/stats/retention cannot b
 # Report options: the only choices a user (or the agent asking them) can make; argparse enforces them and the report prints them.
 OPTIONS = {"period": ("last-month", "month-to-date"), "target": ("orchestrator", "99.5", "99.9", "99.99"), "down_tunnels": ("include", "separate")}
 DEFAULT_OPTIONS = {"period": "last-month", "scope": "all", "target": "orchestrator", "down_tunnels": "include"}
-MAX_ALARMS = 10000
-# Loss % is lost / (received + lost) packets. Below this many received packets in the period the tunnel is close to idle and its
-# loss counters (which also count probe packets) give meaningless percentages, so loss is shown as no data. Seen on 10.0: idle
+MAX_ALARMS = 10000  # maxAlarms sent; a list this long may be cut, so it is reported as a gap
+# Loss % is lost / (received + lost) packets. Below this many received packets in the period a loss % means little (the loss
+# counters also count probe packets), so a tunnel that lost probes there is "no traffic, probes lost" and red. Seen on 10.0: idle
 # SSE and guest overlays with 0 packets received and thousands lost.
-MIN_LOSS_PACKETS = 10000  # maxAlarms sent; a list this long may be cut, so it is reported as a gap
+MIN_LOSS_PACKETS = 10000
 # Used, and listed as a gap, when GET /health/healthThresholdConfig returns nothing (the values a 9.7.1 Orchestrator ships with;
 # capacity's 80/95 % link load is the report's own rule). goodLimit / okLimit as the Orchestrator names them.
 DEFAULT_HEALTH = {"packetLoss": (0.1, 1.0), "latency": (20.0, 50.0), "jitter": (10.0, 20.0), "mos": (1.0, 4.0), "bwUtilization": (80.0, 95.0)}
@@ -69,13 +69,12 @@ DEFAULT_AVAILABILITY = (99.0, 99.5)  # used, and flagged, when GET /stats/config
 _DROP_KEYS = re.compile(r"licen[cs]e[-_]?key|serial|account[-_]?key|password|secret|token", re.I)  # serial: GET /appliance says plain `serial`
 _TOKEN = re.compile(r"\{\{m:([A-Za-z0-9_.\-]+)\}\}")
 _STATUS_WORDS = {"green": ("healthy", "on target", "meets target", "met target", "no issues"),
-                 "amber": ("degraded", "at risk", "warning", "needs attention"),
-                 "red": ("critical", "failing", "below target", "missed target", "outage"),
+                 "amber": ("degraded", "at risk", "needs attention"),
+                 "red": ("failing", "below target", "missed target", "outage"),  # not critical / warning: those name alarm severities
                  "grey": ("no data", "not available", "unknown")}
 MAX_TEXT = 1200
 # Digits that are names, not figures: P95, the 24-hour and 7-day windows, software releases.
-_FIXED_TERMS = re.compile(r"\bP\d{2}\b|\b(?:24|7)[ -]?(?:h|hours?|d|days?)\b|\b(?:ECOS|release|version|Orchestrator)\s+\d+(?:\.\d+)+\b", re.I)
-_SEVERITY_NOUNS = re.compile(r"\b(?:critical|major|minor|warning)\s+(?:and\s+(?:a\s+)?(?:critical|major|minor|warning)\s+)?alarms?\b")
+_FIXED_TERMS = re.compile(r"\bP\d{2}\b|\blast (?:24 hours|7 days)\b|\b(?:ECOS|release|version|Orchestrator)\s+\d+(?:\.\d+)+\b", re.I)
 
 
 # --- collect -----------------------------------------------------------------
@@ -215,6 +214,17 @@ def _collect_noc(c: Collector, nepks: List[str], now_s: int) -> None:
     if nepks:
         c.call("active_alarms", "/alarm/appliance", {"view": "active", "maxAlarms": MAX_ALARMS, "orderBySeverity": True}, {"nePks": nepks})
         c.call("health", "/health", {}, {"from": now_s - 7 * 86400, "to": now_s, "nePks": nepks, "overlayId": -1, "verticals": HEALTH_VERTICALS})
+
+
+def day_retention(retention: Any, kinds: Tuple[str, ...]) -> Optional[int]:
+    """Seconds of daily stats kept for the shortest of `kinds` (each kind's longer DAY entry), from GET /gms/stats/retention."""
+    kept = []
+    for kind in kinds:
+        entries = retention.get(kind) if isinstance(retention, dict) else None
+        days = [e.get("retention") for e in entries or [] if isinstance(e, dict) and str(e.get("granularity")).upper() == "DAY" and isinstance(e.get("retention"), (int, float))]
+        if days:
+            kept.append(int(max(days)))
+    return min(kept) if kept else None
 
 
 def hour_retention(retention: Any) -> Optional[int]:
@@ -452,6 +462,9 @@ def compute(bundle: Mapping[str, Any]) -> Dict[str, Any]:
         sections["exec-capacity"] = {"status": sections["cap-summary"]["status"], "metrics": sections["cap-summary"]["metrics"]}
         sections["exec-noc"] = {"status": sections["noc-summary"]["status"], "metrics": sections["noc-summary"]["metrics"]}
         sections["exec-lifecycle"] = {"status": sections["life-summary"]["status"], "metrics": sections["life-summary"]["metrics"]}
+    kept = day_retention(data.get("retention"), ("tunnel", "interface"))
+    if kept and bundle["period"]["from_ms"] // 1000 < now_s - kept and report in ("availability", "capacity", "executive"):
+        gaps.append("The period starts older than the {:g} days of daily statistics this Orchestrator keeps, so path quality and capacity cover only part of it, or none.".format(kept / 86400))
     sections["data-gaps"] = {"status": "grey" if gaps else "green", "metrics": [], "notes": gaps or ["None: every call returned data."]}
     headline = None
     if report == "executive":
@@ -663,8 +676,11 @@ def _noc(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                 per_ne[item["applianceId"]] = {sev: int(item.get("numOf{}Alarms".format(sev.title())) or 0) for sev in ("critical", "major", "minor", "warning")}
         if isinstance(counts, list):  # only the appliances in scope; GET /alarm/summary is network-wide
             sev_counts = {sev: sum(c.get(sev, 0) for c in per_ne.values()) for sev in sev_counts}
-        else:
+        elif ctx["options"].get("scope", "all") == "all":
             sev_counts = {sev: summary.get("numOf{}Alarms".format(sev.title())) if summary else None for sev in sev_counts}
+        else:  # a scoped report must not show fleet-wide totals
+            sev_counts = {sev: None for sev in sev_counts}
+            gaps.append("Active alarms: GET /alarm/count/appliance gave nothing and GET /alarm/summary is network-wide, so the scoped counts are not shown.")
         rows = [{"appliance": names[ne], "critical": c.get("critical", 0), "major": c.get("major", 0), "minor": c.get("minor", 0), "warning": c.get("warning", 0)}
                 for ne, c in sorted(per_ne.items(), key=lambda i: (-i[1].get("critical", 0), -i[1].get("major", 0)))][:15]
         source = "GET /alarm/summary and GET /alarm/count/appliance (counts only; the alarm list needs the read POST)"
@@ -700,7 +716,7 @@ def _noc(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         gaps.append("Health: POST /health did not run, so hourly health is not shown.")
         health_ids = [metric("health_good_24h_pct", None, "%", "Appliance-hours in good health, last 24h"), metric("health_good_7d_pct", None, "%", "Appliance-hours in good health, last 7d")]
     sections["noc-health"] = {"status": health_status, "metrics": health_ids,
-                              "notes": ["Rule: at least 99% of appliance-hours healthy is green, 95% amber, less red. Statuses seen: {}.".format(", ".join(sorted(seen)) or "none")]}
+                              "notes": ["Rule (the report's own rule: the Orchestrator has no setting for it): at least 99% of appliance-hours healthy is green, 95% amber, less red. Statuses seen: {}.".format(", ".join(sorted(seen)) or "none")]}
 
     # Tunnels down now, from the cached tunnel state (one network-wide read each).
     tunnel_ids, tunnel_rows, tunnel_status = [], [], []
@@ -905,7 +921,7 @@ def validate(metrics: Mapping[str, Any], narrative: Any) -> List[str]:
             problems.append("{}: bare number in the text; cite numbers only as {{{{m:<metric id>}}}}: {!r}".format(sid, re.search(r".{0,20}\d.{0,20}", prose).group(0)))
         if "{{" in prose or "}}" in prose:
             problems.append("{}: malformed token; use {{{{m:<metric id>}}}}".format(sid))
-        lowered = _SEVERITY_NOUNS.sub(" ", prose.lower())  # "a critical alarm" names a severity, not a status
+        lowered = prose.lower()
         for status, words in _STATUS_WORDS.items():
             if status != computed and any(re.search(r"\b" + re.escape(w) + r"\b", lowered) for w in words):
                 problems.append("{}: wording implies {} but the computed status is {}".format(sid, status, computed))

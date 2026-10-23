@@ -430,9 +430,9 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_validator_allows_severity_names_and_fixed_terms(self):
         metrics = report.compute(bundle())  # avail-summary is amber
-        ok = {"report": "availability", "sections": {"avail-summary": {"text": "One critical alarm and a warning alarm were raised; P95 over 24 hours stayed low on ECOS 9.6.2 and the last 7 days."}}}
+        ok = {"report": "availability", "sections": {"avail-summary": {"text": "One critical alarm and a warning alarm were raised; P95 over the last 24 hours stayed low on ECOS 9.6.2 and the last 7 days."}}}
         self.assertEqual(report.validate(metrics, ok), [])
-        bad = {"report": "availability", "sections": {"avail-summary": {"text": "Reachability was 99 percent; the network was critical."}}}
+        bad = {"report": "availability", "sections": {"avail-summary": {"text": "Reachability was 99 percent; there was an outage."}}}
         problems = " ".join(report.validate(metrics, bad))
         self.assertIn("bare number", problems)
         self.assertIn("implies red", problems)
@@ -531,6 +531,42 @@ class OptionTests(CollectTests):
         self.assertEqual(report.compute(b)["metrics"]["fleet_reach_pct"]["status"], "green")
         b["options"] = {"target": "99.9"}
         self.assertEqual(report.compute(b)["metrics"]["fleet_reach_pct"]["status"], "red")
+
+
+class ReviewRound2Tests(unittest.TestCase):
+    def test_severity_words_without_alarm_after_them_are_not_status_words(self):
+        metrics = report.compute(bundle())  # avail-alarms is amber (2 major)
+        for text in ("{{m:alarms_major}} major and {{m:alarms_critical}} critical ones.",
+                     "{{m:alarms_critical}} critical, {{m:alarms_major}} major and {{m:alarms_minor}} minor alarms, plus a warning."):
+            self.assertEqual(report.validate(metrics, {"report": "availability", "sections": {"avail-alarms": {"text": text}}}), [], text)
+        self.assertTrue(report.validate(metrics, {"report": "availability", "sections": {"avail-alarms": {"text": "There was an outage."}}}))
+
+    def test_scoped_get_only_alarms_never_fall_back_to_network_wide_totals(self):
+        summary = {"numOfCriticalAlarms": 9, "numOfMajorAlarms": 9, "numOfMinorAlarms": 9, "numOfWarningAlarms": 9}
+        b = phase2_bundle("noc", alarm_summary=summary)
+        b["options"] = {"scope": ["branch-a"]}
+        m = report.compute(b)
+        self.assertEqual((m["metrics"]["active_critical"]["value"], m["sections"]["noc-alarms"]["status"]), (None, "grey"))
+        self.assertIn("network-wide", " ".join(m["sections"]["data-gaps"]["notes"]))
+        self.assertEqual(report.compute(phase2_bundle("noc", alarm_summary=summary))["metrics"]["active_critical"]["value"], 9)  # scope all: the summary is right
+
+    def test_noc_health_band_is_printed_as_the_reports_own_rule(self):
+        m = report.compute(phase2_bundle("noc", health={"1.NE": [{"status": "HEALTHY", "time": NOW - 60}]}))
+        self.assertIn("the report's own rule", " ".join(m["sections"]["noc-health"]["notes"]))
+
+    def test_fixed_terms_are_only_the_report_windows(self):
+        metrics = report.compute(bundle())
+        bad = {"report": "availability", "sections": {"avail-summary": {"text": "The licence expires in 7 days."}}}
+        self.assertIn("bare number", " ".join(report.validate(metrics, bad)))
+        ok = {"report": "availability", "sections": {"avail-summary": {"text": "Over the last 7 days and the last 24 hours, P95 held."}}}
+        self.assertEqual(report.validate(metrics, ok), [])
+
+    def test_a_period_older_than_daily_retention_is_a_gap(self):
+        b = bundle(retention={"tunnel": [{"granularity": "DAY", "retention": 31 * 86400}], "interface": [{"granularity": "DAY", "retention": 31 * 86400}]})
+        b["period"].update(from_ms=(NOW - 60 * 86400) * 1000, now_s=NOW)
+        self.assertIn("older than the 31 days of daily statistics", " ".join(report.compute(b)["sections"]["data-gaps"]["notes"]))
+        b["period"].update(from_ms=(NOW - 10 * 86400) * 1000)
+        self.assertNotIn("daily statistics", " ".join(report.compute(b)["sections"]["data-gaps"]["notes"]))
 
 
 if __name__ == "__main__":
