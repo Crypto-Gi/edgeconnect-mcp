@@ -1,6 +1,6 @@
 {
   "name": "edgeconnect",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "EdgeConnect Orchestrator MCP server plus the edgeconnect-guide skill (doc map, tested operations, playbooks) and the edgeconnect-report skill (availability, NOC, capacity, lifecycle, incident and executive reports)",
   "author": {
     "name": "Crypto-Gi"

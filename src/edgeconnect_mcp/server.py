@@ -2,7 +2,7 @@
 
 The Orchestrator's own Swagger spec is the allowlist: only method + path pairs it documents can be
 called. Reads are always available (GET, plus the three read-only POSTs in READ_POSTS unless <nickname>_mcp_get_only=true); writes need `<nickname>_mcp_writes=true` in .env for that
-Orchestrator. It speaks stdio (locally or over SSH), or with --http plain HTTP on 127.0.0.1 only (see
+Orchestrator and are refused where <nickname>_mcp_get_only=true. It speaks stdio (locally or over SSH), or with --http plain HTTP on 127.0.0.1 only (see
 http_server.py). API keys never leave this process.
 """
 import argparse
@@ -83,7 +83,7 @@ INSTRUCTIONS = (
     "to locate the REST call, describe_operation for its parameters and body, then api_get (read) or "
     "api_write (change). api_read_post runs only the three read-only POST queries: POST /alarm/appliance, "
     "POST /stats/aggregate/interface and POST /health. Paths are relative to /gms/rest, e.g. /appliance. Writes only work on "
-    "Orchestrators configured as writable. api_write is two-step unless the Orchestrator turns that off: the first "
+    "Orchestrators where list_orchestrators shows writes_enabled true; a GET-only Orchestrator refuses api_read_post and api_write. api_write is two-step unless the Orchestrator turns that off: the first "
     "call sends nothing and returns the exact change and a confirmation code; show the user that change, and only after "
     "they approve call api_write again with the same arguments plus confirmation. "
     "On 9.7 the spec has no write operations for deployment, BGP, OSPF, VRRP or static routes: read the "
@@ -383,7 +383,7 @@ class Server:
              "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "enum": list(READ_POSTS)}, "query": query, "body": {"type": "object", "description": "JSON request body"},
                                                               "orchestrator": orch, "max_chars": max_chars}, "required": ["path", "body"]},
              "annotations": {"readOnlyHint": True, "openWorldHint": True}},
-            {"name": "api_write", "description": "Run a POST, PUT, PATCH or DELETE against the Orchestrator REST API. Changes live network configuration; only allowed on Orchestrators with writes enabled. "
+            {"name": "api_write", "description": "Run a POST, PUT, PATCH or DELETE against the Orchestrator REST API. Changes live network configuration; only allowed where list_orchestrators shows writes_enabled true (never on a GET-only Orchestrator). "
                                                  "Two-step by default: the first call sends nothing and returns the change and a confirmation code; show the change to the user, "
                                                  "and only after they approve repeat the identical call with confirmation set to that code.",
              "inputSchema": {"type": "object", "properties": {"method": {"type": "string", "enum": list(WRITE_METHODS)}, "path": path, "query": query, "body": {"description": "JSON request body"}, "orchestrator": orch, "max_chars": max_chars,
@@ -399,7 +399,8 @@ class Server:
 
     def call_tool(self, name: str, arguments: Mapping[str, Any], read_only: bool = False, caller: Optional[str] = None) -> Any:
         if name == "list_orchestrators":
-            return [{"name": o.name, "host": o.host, "writes_enabled": o.writes, "passthrough_writes_enabled": o.passthrough, "write_confirmation": o.confirm_writes,
+            return [{"name": o.name, "host": o.host, "writes_enabled": o.writes and not o.get_only, "passthrough_writes_enabled": o.passthrough and not o.get_only,
+                     "write_confirmation": o.confirm_writes,
                      "read_posts_enabled": not o.get_only,
                      "high_risk_allowed": list(o.allow_high_risk), "default": o.name == self.default} for o in self.orchestrators.values()]
         orchestrator = self._orchestrator(arguments)
@@ -437,6 +438,8 @@ class Server:
                 raise ToolError("api_write method must be one of {}".format(", ".join(WRITE_METHODS)))
             if read_only:
                 raise ToolError("this access token is read-only; api_write needs mcp_http_token")
+            if orchestrator.get_only:  # owner decision 2026-10-23: a GET-only Orchestrator is GET-only for writes too
+                raise ToolError("{0} is GET-only ({0}_mcp_get_only=true): api_write is refused there even with {0}_mcp_writes=true".format(orchestrator.name))
             if not orchestrator.writes:
                 raise ToolError("writes are disabled for {}; set {}_mcp_writes=true in .env to allow them".format(orchestrator.name, orchestrator.name))
             where = _where(str(arguments.get("path") or ""), arguments.get("query"))
