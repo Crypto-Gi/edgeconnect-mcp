@@ -12,11 +12,12 @@ from edgeconnect_mcp.server import Orchestrator, Server
 PATHS = ["/gms/versions", "/appliance", "/stats/config/availabilityThreshold", "/gms/stats/retention", "/stats/aggregate/availability/appliance",
          "/stats/aggregate/availability/tunnel", "/health/alarmPeriodSummary", "/alarm/summary", "/gmsLicense", "/license/portal/summary",
          "/alarm/count/appliance", "/gms/stats/nonStatsTable/retention", "/maintenanceMode", "/tunnels2/physical", "/tunnels2/bonded",
-         "/stats/timeseries/interfaceOverlay", "/stats/timeseries/interface", "/license/portal/appliance", "/appliance/backup"]
+         "/stats/timeseries/interfaceOverlay", "/stats/timeseries/interface", "/license/portal/appliance", "/appliance/backup",
+         "/health/healthThresholdConfig", "/stats/aggregate/tunnel"]
 POSTS = ["/alarm/appliance", "/health", "/stats/aggregate/interface"]
 SPEC = {"swagger": "2.0", "basePath": "/gms/rest", "paths": dict({p: {"get": {"summary": p}} for p in PATHS}, **{p: {"post": {"summary": p}} for p in POSTS})}
-APPLIANCES = [{"nePk": "1.NE", "hostName": "branch-a", "state": 1, "model": "EC-V", "softwareVersion": "9.6.2.1_1"},
-              {"nePk": "2.NE", "hostName": "branch-b<script>", "state": 2, "model": "EC-XS", "softwareVersion": "9.7.1.0_1"}]
+APPLIANCES = [{"nePk": "1.NE", "hostName": "branch-a", "state": 1, "model": "EC-V", "softwareVersion": "9.6.2.1_1", "serial": "SN-0001"},
+              {"nePk": "2.NE", "hostName": "branch-b<script>", "state": 2, "model": "EC-XS", "softwareVersion": "9.7.1.0_1", "serial": "SN-0002"}]
 
 
 class RoutedClient:
@@ -86,7 +87,7 @@ class ComputeTests(unittest.TestCase):
         self.assertTrue(m["stats_store_down"])
         self.assertEqual(len([n for n in m["sections"]["data-gaps"]["notes"] if "HTTP 500" in n]), 1)
 
-    def test_executive_statuses_and_unbuilt_sections(self):
+    def test_executive_statuses(self):
         b = bundle(alarm_summary={"numOfCriticalAlarms": 0, "numOfMajorAlarms": 1, "numOfMinorAlarms": 0, "numOfWarningAlarms": 3}, gms_license={"daysToExpiration": 45, "usedAppliances": 2, "maxAppliances": 10})
         b["report"] = "executive"
         m = report.compute(b)
@@ -194,6 +195,7 @@ class CollectTests(unittest.TestCase):
         b = report.collect(self.server(client, get_only=False), "lab", "lifecycle", "2026-09")
         self.assertNotIn("AAAA", json.dumps(b))  # licence keys and serials never reach a bundle
         self.assertNotIn("00-11", json.dumps(b))
+        self.assertNotIn("SN-000", json.dumps(b))  # GET /appliance names it plain `serial`
         self.assertEqual(b["data"]["gms_license"], {"daysToExpiration": 400})
 
     def test_get_only_skips_the_read_post_and_falls_back_to_gets(self):
@@ -369,9 +371,15 @@ class PresentationTests(unittest.TestCase):
     def test_tunnels_down_all_period_are_listed_apart_and_left_out_and_the_table_keeps_the_worst_25(self):
         overlay = {"1": [{"count": 1000, "tunnel_state": 0, "blackout": 0, "brownout": 0},
                          {"count": 1000, "tunnel_state": 60000, "blackout": 60000, "brownout": 0, "label": "INET", "serviceName": "SSE", "tunnelcount": 2}]}
-        m = report.compute(bundle(**{"overlay:1.NE": overlay}))
+        m = report.compute(bundle(**{"overlay:1.NE": overlay}))  # default: include them
+        self.assertEqual((m["metrics"]["overlay_avail_pct"]["value"], m["metrics"]["tunnel_groups_down_all_period"]["value"]), (50.0, 2))
+        self.assertIn("counted in the figures above", " ".join(m["sections"]["avail-tunnels"]["notes"]))
+        b = bundle(**{"overlay:1.NE": overlay})
+        b["options"] = {"down_tunnels": "separate"}
+        m = report.compute(b)
         self.assertEqual((m["metrics"]["overlay_avail_pct"]["value"], m["metrics"]["tunnel_groups_down_all_period"]["value"]), (100.0, 2))
         self.assertIn("branch-a overlay INET SSE (2 tunnels)", " ".join(m["sections"]["avail-tunnels"]["notes"]))
+        self.assertIn("down tunnels: separate (2 down all period and 0 idle tunnels losing probes excluded)", report.render(m))
         many = [{"nePk": "{}.NE".format(i), "hostName": "s{}".format(i), "state": 1} for i in range(30)]
         data = {"appliances": many}
         data.update({"overlay:{}.NE".format(i): {"1": [{"count": 100, "tunnel_state": i, "blackout": 0}]} for i in range(30)})
@@ -387,6 +395,142 @@ class PresentationTests(unittest.TestCase):
         self.assertIn('class="bar green"', svg)
         self.assertIn("Scale 90% to 100% (zoomed)", svg)
         self.assertIn("Scale 0% to 100%", report._chart({"title": "t", "zoom": False, "points": [("a", 5.0, "green")]}))
+
+
+THRESHOLDS = {"packetLoss": {"goodLimit": 0.1, "okLimit": 1.0}, "latency": {"goodLimit": 20.0, "okLimit": 50.0},
+              "jitter": {"goodLimit": 10.0, "okLimit": 20.0}, "mos": {"goodLimit": 1.0, "okLimit": 4.0}}
+
+
+class ReviewFixTests(unittest.TestCase):
+    def test_serials_never_reach_a_bundle(self):
+        self.assertEqual(report._scrub({"serial": "X", "serialNumber": "Y", "hostName": "a"}), {"hostName": "a"})
+
+    def test_get_only_alarm_severities_count_only_the_appliances_in_scope(self):
+        m = report.compute(phase2_bundle("noc", alarm_summary={"numOfCriticalAlarms": 9, "numOfMajorAlarms": 9, "numOfMinorAlarms": 9, "numOfWarningAlarms": 9},
+                                         alarm_counts=[{"applianceId": "1.NE", "numOfCriticalAlarms": 1}, {"applianceId": "99.NE", "numOfCriticalAlarms": 5}]))
+        self.assertEqual((m["metrics"]["active_critical"]["value"], m["metrics"]["active_major"]["value"]), (1, 0))
+
+    def test_stats_store_down_ignores_skipped_and_refused_posts(self):
+        b = bundle(**{"reach:1.NE": None, "reach:2.NE": None})
+        b["calls"] = [{"id": "r", "method": "GET", "path": "/stats/aggregate/availability/appliance", "outcome": "error", "http_status": 500, "error": "HTTP 500"},
+                      {"id": "i", "method": "POST", "path": "/stats/aggregate/interface", "outcome": "skipped", "error": "get_only"},
+                      {"id": "j", "method": "POST", "path": "/stats/aggregate/interface", "outcome": "error", "http_status": 403, "error": "HTTP 403"}]
+        self.assertTrue(report.compute(b)["stats_store_down"])
+
+    def test_licence_tile_and_section_use_one_rule(self):
+        for days, expected in ((30, "red"), (90, "amber"), (91, "green")):
+            m = report.compute(phase2_bundle("lifecycle", gms_license={"daysToExpiration": days}))
+            self.assertEqual((m["metrics"]["license_days_left"]["status"], m["sections"]["life-licences"]["status"]), (expected, expected), days)
+
+    def test_alarm_list_at_the_cap_is_a_gap(self):
+        m = report.compute(phase2_bundle("noc", active_alarms=[{"applianceId": "1.NE", "severity": "MINOR"}] * report.MAX_ALARMS))
+        self.assertIn("10000-alarm cap", " ".join(m["sections"]["data-gaps"]["notes"]))
+        m = report.compute(bundle(appliance_alarms=[{"applianceId": "1.NE", "severity": "MINOR"}] * report.MAX_ALARMS))
+        self.assertIn("10000-alarm cap", " ".join(m["sections"]["data-gaps"]["notes"]))
+
+    def test_validator_allows_severity_names_and_fixed_terms(self):
+        metrics = report.compute(bundle())  # avail-summary is amber
+        ok = {"report": "availability", "sections": {"avail-summary": {"text": "One critical alarm and a warning alarm were raised; P95 over 24 hours stayed low on ECOS 9.6.2 and the last 7 days."}}}
+        self.assertEqual(report.validate(metrics, ok), [])
+        bad = {"report": "availability", "sections": {"avail-summary": {"text": "Reachability was 99 percent; the network was critical."}}}
+        problems = " ".join(report.validate(metrics, bad))
+        self.assertIn("bare number", problems)
+        self.assertIn("implies red", problems)
+
+    def test_path_quality_grades_each_tunnel_against_the_health_thresholds(self):
+        paths = {"bondedTunnel_1": {"1.NE": {"alias": "to_hub_DEFAULT", "overlayid": "1", "SUM_POST_LOSS": 200, "SUM_WRX_PKTS": 99800, "AVG_LATENCY_AVG": 30, "AVG_JITTER": 2, "mos": 430}},
+                 "tunnel_2": {"1.NE": {"alias": "to_hub_INET", "overlayid": "0", "SUM_POST_LOSS": 0, "SUM_WRX_PKTS": 100000, "AVG_LATENCY_AVG": 5, "AVG_JITTER": 1, "mos": 440}},
+                 "tunnel_3": {"1.NE": {"alias": "to_hub_LTE", "overlayid": "0", "SUM_POST_LOSS": 5000, "SUM_WRX_PKTS": 95000, "AVG_LATENCY_AVG": 90, "AVG_JITTER": 30, "mos": 50}},
+                 "bondedTunnel_4": {"1.NE": {"alias": "to_hub_GUEST", "overlayid": "2", "SUM_POST_LOSS": 3433, "SUM_WRX_PKTS": 0, "AVG_LATENCY_AVG": 5, "AVG_JITTER": 1, "mos": 440}}}
+        m = report.compute(bundle(health_threshold=THRESHOLDS, **{"paths:1.NE": paths}))
+        rows = {r["tunnel"]: (r["loss_pct"], r["latency_ms"], r["mos"], r["status"]) for r in m["sections"]["avail-paths"]["table"]}
+        self.assertEqual(rows, {"to_hub_DEFAULT": (0.2, 30.0, 4.3, "amber"), "to_hub_INET": (0.0, 5.0, 4.4, "green"), "to_hub_LTE": (5.0, 90.0, 0.5, "red"),
+                                "to_hub_GUEST": (None, 5.0, 4.4, "red")})  # no traffic but probes lost: a broken path, red, not "no data"
+        self.assertEqual([r["tunnel"] for r in m["sections"]["avail-paths"]["table"]][0], "to_hub_LTE")  # worst first
+        self.assertEqual({k: m["metrics"][k]["value"] for k in ("paths_measured", "paths_red", "paths_amber")}, {"paths_measured": 4, "paths_red": 2, "paths_amber": 1})
+        self.assertEqual(m["sections"]["avail-paths"]["status"], "red")
+        self.assertEqual(m["metrics"]["paths_idle_probe_loss"]["value"], 1)
+        b = bundle(health_threshold=THRESHOLDS, **{"paths:1.NE": paths})
+        b["options"] = {"down_tunnels": "separate"}
+        m = report.compute(b)  # separate: listed apart and left out of the status
+        self.assertNotIn("to_hub_GUEST", [r["tunnel"] for r in m["sections"]["avail-paths"]["table"]])
+        self.assertIn("listed apart", " ".join(m["sections"]["avail-paths"]["notes"]))
+        self.assertIn("1 idle tunnels losing probes excluded", report.render(m))
+        silent = {"tunnel_9": {"1.NE": {"alias": "to_hub_SPARE", "overlayid": "0", "SUM_POST_LOSS": 0, "SUM_WRX_PKTS": 0, "AVG_LATENCY_AVG": 5, "AVG_JITTER": 1, "mos": 440}}}
+        row = report.compute(bundle(health_threshold=THRESHOLDS, **{"paths:1.NE": silent}))["sections"]["avail-paths"]["table"][0]
+        self.assertEqual((row["loss_pct"], row["note"], row["status"]), (None, "", "green"))  # no packets and no probe loss: loss is no data
+        m = report.compute(bundle(**{"paths:1.NE": paths}))  # no thresholds read: defaults, listed as a gap
+        self.assertIn("healthThresholdConfig", " ".join(m["sections"]["data-gaps"]["notes"]))
+
+    def test_banner_names_statistics_not_only_availability(self):
+        m = report.compute(phase2_bundle("capacity"))
+        m["stats_store_down"] = True
+        self.assertIn("so statistics are missing", report.render(m))
+
+
+class ReviewCollectTests(CollectTests):
+    def answers(self):
+        a = super().answers()
+        a.update({"/stats/aggregate/interface": CapacityTests.TOTALS,
+                  "/gms/stats/retention": {"interface": [{"granularity": "HOUR", "retention": 7 * 86400}, {"granularity": "HOUR", "retention": 3 * 86400}, {"granularity": "DAY", "retention": 93 * 86400}]}})
+        return a
+
+    def test_capacity_past_month_uses_daily_data_and_current_month_uses_hourly_retention(self):
+        client = RoutedClient(self.answers())
+        b = report.collect(self.server(client, get_only=False), "lab", "capacity", "2026-09", now=datetime(2026, 10, 23, tzinfo=timezone.utc))
+        series = [c[2] for c in client.calls if c[1] == "/stats/timeseries/interface"]
+        self.assertEqual({(q["granularity"], q["startTime"], q["endTime"]) for q in series}, {("day", 1788220800, 1790812799)})
+        self.assertEqual(b["data"]["capacity_basis"]["granularity"], "day")
+        client = RoutedClient(self.answers())
+        report.collect(self.server(client, get_only=False), "lab", "capacity", "2026-10", now=datetime(2026, 10, 23, tzinfo=timezone.utc))
+        q = [c[2] for c in client.calls if c[1] == "/stats/timeseries/interface"][0]
+        self.assertEqual((q["granularity"], q["endTime"] - q["startTime"]), ("hour", 7 * 86400))  # the longer HOUR retention read from the Orchestrator
+
+    def test_daily_basis_is_computed_per_day_and_labelled(self):
+        daily = [{"tx_bytes": 1080000000000 * 0.5, "rx_bytes": 0, "max_bw_tx": 100000, "max_bw_rx": 100000}]  # half of 100 Mbps for a day
+        m = report.compute(phase2_bundle("capacity", interface_totals=CapacityTests.TOTALS, capacity_basis={"granularity": "day", "retention_known": True},
+                                         **{"hourly:1.NE:wan0": daily}))
+        row = [r for r in m["sections"]["cap-links"]["table"] if r["interface"] == "wan0"][0]
+        self.assertEqual(row["p95_out_pct"], 50.0)
+        self.assertIn("daily averages", " ".join(m["sections"]["cap-links"]["notes"]))
+
+    def test_nickname_case_and_dotenv_environment(self):
+        client = RoutedClient(self.answers())
+        report.collect(self.server(client, get_only=False), "Lab", "availability", "2026-09", now=datetime(2026, 10, 23, tzinfo=timezone.utc))
+        self.assertTrue([c for c in client.calls if c[0] == "POST"])  # not skipped as get_only
+        from unittest import mock
+        with mock.patch.dict("os.environ", {"EDGECONNECT_DOTENV": "/x/ec.env"}), mock.patch.object(report.Server, "from_dotenv", side_effect=OSError("stop")) as loader, \
+                mock.patch("sys.stderr"):
+            self.assertEqual(report.main(["collect", "--orchestrator", "lab", "--report", "noc"]), 1)
+        loader.assert_called_once_with("/x/ec.env")
+
+
+class OptionTests(CollectTests):
+    def test_choices_outside_the_list_are_rejected(self):
+        from unittest import mock
+        for bad in (["--target", "98"], ["--down-tunnels", "drop"], ["--period", "last-week"]):
+            with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                report.main(["collect", "--orchestrator", "lab", "--report", "availability"] + bad)
+        with self.assertRaises(ValueError):
+            report.collect(self.server(RoutedClient(self.answers()), get_only=True), "lab", "availability", target="95")
+        with self.assertRaisesRegex(ValueError, "does not have: nowhere"):
+            report.collect(self.server(RoutedClient(self.answers()), get_only=True), "lab", "availability", appliances=["branch-a", "nowhere"])
+
+    def test_period_defaults_to_last_month_and_options_are_stored_and_printed(self):
+        now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+        self.assertEqual((report.resolve_month("last-month", now), report.resolve_month("month-to-date", now)), ("2025-12", "2026-01"))
+        b = report.collect(self.server(RoutedClient(self.answers()), get_only=True), "lab", "availability", appliances=["branch-a"], now=now, target="99.9")
+        self.assertEqual(b["options"], {"period": "last-month", "month": "2025-12", "scope": ["branch-a"], "target": "99.9", "down_tunnels": "include"})
+        page = report.render(report.compute(b))
+        self.assertIn("Report options: period: last-month (2025-12); scope: branch-a; availability target: 99.9%; down tunnels: include", page)
+        self.assertEqual(page.count("Report options:"), 2)  # under the title and in the footer
+
+    def test_a_fixed_target_is_met_or_missed(self):
+        b = bundle()  # fleet 99.75%
+        b["options"] = {"target": "99.5"}
+        self.assertEqual(report.compute(b)["metrics"]["fleet_reach_pct"]["status"], "green")
+        b["options"] = {"target": "99.9"}
+        self.assertEqual(report.compute(b)["metrics"]["fleet_reach_pct"]["status"], "red")
 
 
 if __name__ == "__main__":

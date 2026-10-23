@@ -161,7 +161,7 @@ The playbooks are for reference only. Every operation the skill names passed in 
 `skills/edgeconnect-report/` builds five reports: `availability` (monthly service level), `noc` (what is broken now, last 24 hours and 7 days), `capacity` (WAN links by P95 utilisation), `lifecycle` (software, licences, backups and known security advisories) and `executive` (a one-page summary of all of them). Code does the reading and the maths; the assistant only writes the prose, and a validator rejects prose that types a number or contradicts a computed status:
 
 ```bash
-edgeconnect-mcp report collect --orchestrator lab --report availability --month 2026-09 --out rep
+edgeconnect-mcp report collect --orchestrator lab --report availability --period last-month --out rep   # options: --scope, --target, --down-tunnels
 edgeconnect-mcp report compute rep/bundle.json
 edgeconnect-mcp report template rep/metrics.json      # sections, statuses and metric ids for the prose
 edgeconnect-mcp report validate rep/metrics.json rep/narrative.json

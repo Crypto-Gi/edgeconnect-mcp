@@ -13,6 +13,7 @@ import hashlib
 import html
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -30,7 +31,7 @@ STATUSES = ("green", "amber", "red", "grey")
 REPORTS = ("availability", "noc", "capacity", "lifecycle", "executive")
 SECTIONS = {
     "availability": (("avail-summary", "Availability summary"), ("avail-appliances", "Appliance reachability"),
-                     ("avail-tunnels", "Tunnel availability"), ("avail-alarms", "Alarms in the period"), ("data-gaps", "Data gaps")),
+                     ("avail-tunnels", "Tunnel availability"), ("avail-paths", "Path quality"), ("avail-alarms", "Alarms in the period"), ("data-gaps", "Data gaps")),
     "noc": (("noc-summary", "NOC summary"), ("noc-appliances", "Appliance state"), ("noc-alarms", "Active alarms"), ("noc-health", "Health"),
             ("noc-tunnels", "Tunnels down"), ("noc-worst", "Sites needing attention"), ("data-gaps", "Data gaps")),
     "capacity": (("cap-summary", "WAN capacity summary"), ("cap-links", "WAN links by P95 utilisation"), ("data-gaps", "Data gaps")),
@@ -51,26 +52,40 @@ STATE_NAMES = {1: "normal", 2: "unreachable", 3: "unsupported", 4: "out of sync"
 GOOD_HEALTH = ("HEALTHY",)  # POST /health hourly `status` that counts as good; the spec enum is HEALTHY, WARNING, MINOR, MAJOR, CRITICAL
 WAN_INTERFACE = re.compile(r"^b?wan\d", re.I)  # WAN ports and their VLANs (wan0, wan1.20, bwan0) in POST /stats/aggregate/interface
 HEALTH_VERTICALS = ["ALARM", "LOSS", "LATENCY", "JITTER", "MOS", "BW_UTILIZATION"]
-HOURLY_RETENTION = 14 * 86400  # hourly stats are kept 14 days by default (GET /gms/stats/retention), so P95 looks back at most this far
+HOURLY_RETENTION = 14 * 86400  # fallback when GET /gms/stats/retention cannot be read: hourly interface stats kept 14 days by default
+# Report options: the only choices a user (or the agent asking them) can make; argparse enforces them and the report prints them.
+OPTIONS = {"period": ("last-month", "month-to-date"), "target": ("orchestrator", "99.5", "99.9", "99.99"), "down_tunnels": ("include", "separate")}
+DEFAULT_OPTIONS = {"period": "last-month", "scope": "all", "target": "orchestrator", "down_tunnels": "include"}
+MAX_ALARMS = 10000
+# Loss % is lost / (received + lost) packets. Below this many received packets in the period the tunnel is close to idle and its
+# loss counters (which also count probe packets) give meaningless percentages, so loss is shown as no data. Seen on 10.0: idle
+# SSE and guest overlays with 0 packets received and thousands lost.
+MIN_LOSS_PACKETS = 10000  # maxAlarms sent; a list this long may be cut, so it is reported as a gap
+# Used, and listed as a gap, when GET /health/healthThresholdConfig returns nothing (the values a 9.7.1 Orchestrator ships with;
+# capacity's 80/95 % link load is the report's own rule). goodLimit / okLimit as the Orchestrator names them.
+DEFAULT_HEALTH = {"packetLoss": (0.1, 1.0), "latency": (20.0, 50.0), "jitter": (10.0, 20.0), "mos": (1.0, 4.0), "bwUtilization": (80.0, 95.0)}
 DEFAULT_AVAILABILITY = (99.0, 99.5)  # used, and flagged, when GET /stats/config/availabilityThreshold returns nothing
 # Keys never copied into a bundle, whatever the server's redaction does.
-_DROP_KEYS = re.compile(r"licen[cs]e[-_]?key|serial[-_]?number|account[-_]?key|password|secret|token", re.I)
+_DROP_KEYS = re.compile(r"licen[cs]e[-_]?key|serial|account[-_]?key|password|secret|token", re.I)  # serial: GET /appliance says plain `serial`
 _TOKEN = re.compile(r"\{\{m:([A-Za-z0-9_.\-]+)\}\}")
 _STATUS_WORDS = {"green": ("healthy", "on target", "meets target", "met target", "no issues"),
                  "amber": ("degraded", "at risk", "warning", "needs attention"),
                  "red": ("critical", "failing", "below target", "missed target", "outage"),
                  "grey": ("no data", "not available", "unknown")}
 MAX_TEXT = 1200
+# Digits that are names, not figures: P95, the 24-hour and 7-day windows, software releases.
+_FIXED_TERMS = re.compile(r"\bP\d{2}\b|\b(?:24|7)[ -]?(?:h|hours?|d|days?)\b|\b(?:ECOS|release|version|Orchestrator)\s+\d+(?:\.\d+)+\b", re.I)
+_SEVERITY_NOUNS = re.compile(r"\b(?:critical|major|minor|warning)\s+(?:and\s+(?:a\s+)?(?:critical|major|minor|warning)\s+)?alarms?\b")
 
 
 # --- collect -----------------------------------------------------------------
 
 class Collector:
     def __init__(self, server: Any, orchestrator: str) -> None:
-        self.server, self.orchestrator = server, orchestrator
+        self.server, self.orchestrator = server, orchestrator.strip().lower()  # the server lowercases nicknames
         self.calls: List[Dict[str, Any]] = []
         self.data: Dict[str, Any] = {}
-        self.read_posts = next((o["read_posts_enabled"] for o in self._tool("list_orchestrators", {})[1] if o["name"] == orchestrator), False)
+        self.read_posts = next((o["read_posts_enabled"] for o in self._tool("list_orchestrators", {})[1] if o["name"] == self.orchestrator), False)
 
     def _tool(self, name: str, arguments: Mapping[str, Any]) -> Tuple[bool, Any]:
         response = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": dict(arguments, max_chars=10 ** 9)}})
@@ -127,16 +142,35 @@ def month_window(month: str, now: Optional[datetime] = None) -> Tuple[date, int,
     return first, int(start.timestamp() * 1000), int(min(end, now).timestamp() * 1000)
 
 
-def collect(server: Any, orchestrator: str, report: str, month: str, appliances: Optional[List[str]] = None, top: int = 20,
-            now: Optional[datetime] = None) -> Dict[str, Any]:
+def resolve_month(period: str, now: datetime) -> str:
+    """last-month is the previous calendar month; month-to-date is this one."""
+    if period not in OPTIONS["period"]:
+        raise ValueError("--period must be one of {}".format(", ".join(OPTIONS["period"])))
+    year, month = (now.year, now.month) if period == "month-to-date" else (now.year - (now.month == 1), now.month - 1 or 12)
+    return "{:04d}-{:02d}".format(year, month)
+
+
+def collect(server: Any, orchestrator: str, report: str, month: Optional[str] = None, appliances: Optional[List[str]] = None, top: int = 20,
+            now: Optional[datetime] = None, period: str = "last-month", target: str = "orchestrator", down_tunnels: str = "include") -> Dict[str, Any]:
     now = now or datetime.now(timezone.utc)
+    for name, value in (("target", target), ("down_tunnels", down_tunnels)):
+        if value not in OPTIONS[name]:
+            raise ValueError("{} must be one of {}".format(name, ", ".join(OPTIONS[name])))
+    options = {"period": "month" if month else period, "scope": "all", "target": target, "down_tunnels": down_tunnels}
+    month = month or resolve_month(period, now)
+    options["month"] = month
     first, start_ms, end_ms = month_window(month, now)
     c = Collector(server, orchestrator)
     c.call("versions", "/gms/versions")
     inventory = c.call("appliances", "/appliance") or []
     if appliances:
+        known = {a.get("nePk") for a in inventory} | {a.get("hostName") for a in inventory}
+        unknown = [a for a in appliances if a not in known]
+        if unknown:
+            raise ValueError("--scope names appliances this Orchestrator does not have: {}".format(", ".join(unknown)))
         inventory = [a for a in inventory if a.get("nePk") in appliances or a.get("hostName") in appliances]
         c.data["appliances"] = inventory
+        options["scope"] = list(appliances)
     nepks = [a["nePk"] for a in inventory if a.get("nePk")]
     parts = PARTS.get(report, (report,))
     if "availability" in parts:
@@ -144,10 +178,10 @@ def collect(server: Any, orchestrator: str, report: str, month: str, appliances:
     if "noc" in parts:
         _collect_noc(c, nepks, int(now.timestamp()))
     if "capacity" in parts:
-        _collect_capacity(c, nepks, start_ms // 1000, end_ms // 1000, top)
+        _collect_capacity(c, nepks, start_ms // 1000, end_ms // 1000, top, int(now.timestamp()))
     if "lifecycle" in parts:
         _collect_lifecycle(c, nepks)
-    return {"kind": "edgeconnect-report-bundle", "generator": __version__, "report": report, "orchestrator": orchestrator,
+    return {"kind": "edgeconnect-report-bundle", "generator": __version__, "report": report, "orchestrator": c.orchestrator, "options": options,
             "period": {"month": month, "from_ms": start_ms, "to_ms": end_ms, "now_s": int(now.timestamp())},
             "collected_at": now.isoformat(timespec="seconds"), "read_posts_enabled": c.read_posts, "calls": c.calls, "data": c.data,
             "units": {"stats_time": "epoch seconds", "alarm_and_audit_time": "epoch milliseconds", "availability": "date YYYY-MM-DD; values are minute sample counts",
@@ -156,6 +190,7 @@ def collect(server: Any, orchestrator: str, report: str, month: str, appliances:
 
 def _collect_availability(c: Collector, nepks: List[str], first: date, start_ms: int, end_ms: int) -> None:
     c.call("availability_threshold", "/stats/config/availabilityThreshold")
+    c.call("health_threshold", "/health/healthThresholdConfig")
     c.call("retention", "/gms/stats/retention")
     for ne in nepks:
         # Availability takes a date, alarms take epoch milliseconds (stats aggregates would take seconds).
@@ -163,8 +198,10 @@ def _collect_availability(c: Collector, nepks: List[str], first: date, start_ms:
         c.call("overlay:" + ne, "/stats/aggregate/availability/tunnel", {"nePk": ne, "date": first.isoformat(), "granularity": "month", "overlayId": "all"})
         c.call("underlay:" + ne, "/stats/aggregate/availability/tunnel", {"nePk": ne, "date": first.isoformat(), "granularity": "month", "overlayId": "0"})
         c.call("alarm_period:" + ne, "/health/alarmPeriodSummary", {"applianceId": ne, "from": start_ms, "to": end_ms})
+        # Path quality per tunnel over the period: aggregate stats take epoch seconds, daily buckets are kept for months.
+        c.call("paths:" + ne, "/stats/aggregate/tunnel", {"nePk": ne, "startTime": start_ms // 1000, "endTime": end_ms // 1000, "granularity": "day"})
     if nepks:
-        c.call("appliance_alarms", "/alarm/appliance", {"view": "all", "from": start_ms, "to": end_ms, "maxAlarms": 10000, "orderBySeverity": True}, {"nePks": nepks})
+        c.call("appliance_alarms", "/alarm/appliance", {"view": "all", "from": start_ms, "to": end_ms, "maxAlarms": MAX_ALARMS, "orderBySeverity": True}, {"nePks": nepks})
 
 
 def _collect_noc(c: Collector, nepks: List[str], now_s: int) -> None:
@@ -176,21 +213,35 @@ def _collect_noc(c: Collector, nepks: List[str], now_s: int) -> None:
     c.call("tunnels_physical", "/tunnels2/physical", {"operStatus": "true", "srcNePk": "true", "alias": "true"})
     c.call("tunnels_bonded", "/tunnels2/bonded", {"operStatus": "true", "srcNePk": "true", "alias": "true", "tag": "true"})
     if nepks:
-        c.call("active_alarms", "/alarm/appliance", {"view": "active", "maxAlarms": 10000, "orderBySeverity": True}, {"nePks": nepks})
+        c.call("active_alarms", "/alarm/appliance", {"view": "active", "maxAlarms": MAX_ALARMS, "orderBySeverity": True}, {"nePks": nepks})
         c.call("health", "/health", {}, {"from": now_s - 7 * 86400, "to": now_s, "nePks": nepks, "overlayId": -1, "verticals": HEALTH_VERTICALS})
 
 
-def _collect_capacity(c: Collector, nepks: List[str], start_s: int, end_s: int, top: int) -> None:
+def hour_retention(retention: Any) -> Optional[int]:
+    """Seconds of hourly interface stats the Orchestrator keeps (the longer of the two HOUR entries GET /gms/stats/retention lists)."""
+    entries = retention.get("interface") if isinstance(retention, dict) else None
+    hours = [e.get("retention") for e in entries or [] if isinstance(e, dict) and str(e.get("granularity")).upper() == "HOUR" and isinstance(e.get("retention"), (int, float))]
+    return int(max(hours)) if hours else None
+
+
+def _collect_capacity(c: Collector, nepks: List[str], start_s: int, end_s: int, top: int, now_s: int) -> None:
     if not nepks:
         return
+    for cid, path in (("retention", "/gms/stats/retention"), ("health_threshold", "/health/healthThresholdConfig")):
+        if cid not in c.data:
+            c.call(cid, path)
+    kept = hour_retention(c.data.get("retention"))
+    # Hourly data reaches back from now, not from the period's end: a period past it gets daily buckets instead.
+    hourly_from = max(start_s, now_s - (kept or HOURLY_RETENTION))
+    basis = {"granularity": "hour", "from": hourly_from, "to": end_s} if hourly_from < end_s else {"granularity": "day", "from": start_s, "to": end_s}
+    c.data["capacity_basis"] = dict(basis, retention_known=kept is not None)
     totals = c.call("interface_totals", "/stats/aggregate/interface", {"startTime": start_s, "endTime": end_s, "granularity": "day", "trafficType": "all_traffic"}, {"nePks": nepks})
     if totals is None:  # GET-only, or the POST was refused: the overlay transport stats mark WAN-side interfaces (last day only)
         for ne in nepks:
             c.call("wan_side:" + ne, "/stats/timeseries/interfaceOverlay", {"nePk": ne, "startTime": end_s - 86400, "endTime": end_s, "granularity": "day"})
-    hourly_from = max(start_s, end_s - HOURLY_RETENTION)
     for link in wan_links(c.data, nepks)[:top]:  # busiest first, so the P95 reads go to the links most likely to be full
         c.call("hourly:{}:{}".format(link["nePk"], link["interface"]), "/stats/timeseries/interface",
-               {"nePk": link["nePk"], "startTime": hourly_from, "endTime": end_s, "granularity": "hour", "trafficType": "all_traffic", "interfaceName": link["interface"]})
+               {"nePk": link["nePk"], "startTime": basis["from"], "endTime": basis["to"], "granularity": basis["granularity"], "trafficType": "all_traffic", "interfaceName": link["interface"]})
 
 
 def _collect_lifecycle(c: Collector, nepks: List[str]) -> None:
@@ -217,6 +268,18 @@ def worst(statuses: List[str]) -> str:
     return max(known, key=("green", "amber", "red").index) if known else "grey"
 
 
+def _target_limits(ctx: Dict[str, Any], key: str) -> Tuple[float, float]:
+    """Availability limits: a fixed --target is met (green) or missed (red); `orchestrator` uses its configured thresholds."""
+    target = ctx["options"].get("target", "orchestrator")
+    if target != "orchestrator":
+        return float(target), float(target)
+    limits, default_used = _limits(ctx["data"].get("availability_threshold") or {}, key)
+    note = "No availability thresholds configured; default {} / {} % used.".format(*DEFAULT_AVAILABILITY)
+    if default_used and note not in ctx["gaps"]:
+        ctx["gaps"].append(note)
+    return limits
+
+
 def _limits(threshold: Any, key: str) -> Tuple[Tuple[float, float], bool]:
     item = threshold.get(key) if isinstance(threshold, dict) else None
     if isinstance(item, dict) and isinstance(item.get("goodLimit"), (int, float)) and isinstance(item.get("okLimit"), (int, float)):
@@ -228,8 +291,8 @@ def _pct(part: float, whole: float) -> Optional[float]:
     return round(100.0 * part / whole, 3) if whole else None
 
 
-def _tunnel_totals(value: Any) -> Dict[str, Any]:
-    """Seconds sampled, down and degraded, plus the groups down for the whole period, up under 1% of it (kept apart, not in the totals).
+def _tunnel_totals(value: Any, separate: bool = False) -> Dict[str, Any]:
+    """Seconds sampled, down and degraded, plus the groups down for the whole period (up under 1% of it), which `separate` leaves out of the totals.
 
     `count` is minute samples while tunnel_state, blackout and brownout are seconds (seen on 9.7.1 and 10.0: count 1441 for a
     day, downtime up to count x 60); tunnel_state and blackout overlap, so take the larger."""
@@ -242,7 +305,8 @@ def _tunnel_totals(value: Any) -> Dict[str, Any]:
                 down = min(seconds, max(float(row.get("tunnel_state") or 0), float(row.get("blackout") or 0)))
                 if seconds and down >= ALWAYS_DOWN * seconds:
                     totals["always_down"].append(row)
-                    continue
+                    if separate:
+                        continue
                 totals["seconds"] += seconds
                 totals["down"] += down
                 totals["brownout"] += min(seconds, float(row.get("brownout") or 0))
@@ -308,9 +372,26 @@ def wan_links(data: Mapping[str, Any], nepks: Any) -> List[Dict[str, Any]]:
     return sorted(links.values(), key=lambda link: -max(link["avg_tx_pct"] or 0, link["avg_rx_pct"] or 0))
 
 
-def _load_status(pct: Optional[float]) -> str:
-    """Link load: P95 at or above 80% is amber, at or above 95% red."""
-    return "grey" if pct is None else "red" if pct >= 95 else "amber" if pct >= 80 else "green"
+def _expiry_status(days: int) -> str:
+    """Licences: 30 days or less red, 90 days or less amber."""
+    return "red" if days <= 30 else "amber" if days <= 90 else "green"
+
+
+def _load_status(pct: Optional[float], limits: Tuple[float, float] = DEFAULT_HEALTH["bwUtilization"]) -> str:
+    """Link load: at or above the lower limit amber, at or above the higher red."""
+    low, high = sorted(limits)
+    return "grey" if pct is None else "red" if pct >= high else "amber" if pct >= low else "green"
+
+
+def health_limits(data: Mapping[str, Any], key: str, gaps: List[str]) -> Tuple[float, float]:
+    """goodLimit / okLimit for one metric from GET /health/healthThresholdConfig, else the default (listed as a gap once)."""
+    item = (data.get("health_threshold") or {}).get(key) if isinstance(data.get("health_threshold"), dict) else None
+    if isinstance(item, dict) and isinstance(item.get("goodLimit"), (int, float)) and isinstance(item.get("okLimit"), (int, float)):
+        return float(item["goodLimit"]), float(item["okLimit"])
+    note = "No {} limits from GET /health/healthThresholdConfig; default {} / {} used.".format(key, *DEFAULT_HEALTH[key])
+    if note not in gaps:
+        gaps.append(note)
+    return DEFAULT_HEALTH[key]
 
 
 def _util(byte_count: float, seconds: float, kbps: float) -> Optional[float]:
@@ -328,7 +409,8 @@ def compute(bundle: Mapping[str, Any]) -> Dict[str, Any]:
         metrics[mid] = {"value": value, "unit": unit, "label": label, "status": status}
         return mid
 
-    stats_calls = [c for c in calls if c["path"].startswith("/stats/")]
+    # Skipped (get_only) and refused (401/403) calls say nothing about the statistics store.
+    stats_calls = [c for c in calls if c["path"].startswith("/stats/") and c.get("outcome") != "skipped" and c.get("http_status") not in (401, 403)]
     stats_down = bool(stats_calls) and all(c.get("outcome") == "error" and c.get("http_status") == 500 for c in stats_calls)
     for c in calls:
         if c.get("outcome") in ("error", "skipped") and not (stats_down and c["path"].startswith("/stats/")):
@@ -340,7 +422,9 @@ def compute(bundle: Mapping[str, Any]) -> Dict[str, Any]:
     names = {a.get("nePk"): a.get("hostName") or a.get("nePk") for a in inventory}
     now_s = int(bundle["period"].get("now_s") or bundle["period"]["to_ms"] // 1000)
     parts = PARTS.get(report, (report,))
-    ctx = {"data": data, "inventory": inventory, "names": names, "metric": metric, "metrics": metrics, "gaps": gaps, "stats_down": stats_down, "now_s": now_s}
+    options = dict(DEFAULT_OPTIONS, month=bundle["period"]["month"])
+    options.update(bundle.get("options") or {})
+    ctx = {"data": data, "inventory": inventory, "names": names, "metric": metric, "metrics": metrics, "gaps": gaps, "stats_down": stats_down, "now_s": now_s, "options": options}
     m_total = metric("appliances_total", len(inventory), "appliances", "Appliances in scope")
     if "availability" in parts:
         sections.update(_availability(ctx))
@@ -359,8 +443,8 @@ def compute(bundle: Mapping[str, Any]) -> Dict[str, Any]:
         metric("reachable_now", len(reachable_now), "appliances", "Appliances reachable at collection time")
         sections["exec-fleet"] = {"status": fleet_status, "metrics": [m_total, "reachable_now", m_now],
                                   "notes": ["Rule: any appliance down is amber; more than 10% down is red. The appliance list is in the availability and NOC reports."]}
-        sections["exec-availability"] = {"status": worst([sections["avail-appliances"]["status"], sections["avail-tunnels"]["status"]]),
-                                         "metrics": ["fleet_reach_pct", "overlay_avail_pct", "underlay_avail_pct", "appliances_below_target"]}
+        sections["exec-availability"] = {"status": worst([sections[sid]["status"] for sid in ("avail-appliances", "avail-tunnels", "avail-paths")]),
+                                         "metrics": ["fleet_reach_pct", "overlay_avail_pct", "underlay_avail_pct", "appliances_below_target", "paths_red"]}
         sections["exec-alarms"] = dict(sections["noc-alarms"], table=[])
         sections["exec-licensing"] = dict(sections["life-licences"], table=[])
         sections["exec-software"] = {"status": metrics["ecos_trains"]["status"], "metrics": ["ecos_versions", "ecos_trains", "orchestrator_version"],
@@ -384,6 +468,8 @@ def compute(bundle: Mapping[str, Any]) -> Dict[str, Any]:
             "orchestrator_version": (data.get("versions") or {}).get("current") if isinstance(data.get("versions"), dict) else None,
             "period": bundle["period"], "collected_at": bundle["collected_at"], "bundle_sha256": bundle.get("sha256"),
             "coverage": {"appliances": len(names), "with_data": answered}, "stats_store_down": stats_down,
+            "options": dict(options, down_tunnels_count=metrics.get("tunnel_groups_down_all_period", {}).get("value"),
+                            idle_paths_count=metrics.get("paths_idle_probe_loss", {}).get("value")),
             "headline": headline, "metrics": metrics, "sections": {sid: sections[sid] for sid, _ in SECTIONS[report]}}
 
 
@@ -392,9 +478,7 @@ def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     sections: Dict[str, Dict[str, Any]] = {}
     threshold = data.get("availability_threshold") or {}
     # Appliance reachability: minute samples, so % = reachable minutes / sample count.
-    limits, default_used = _limits(threshold, "reachability")
-    if default_used:
-        gaps.append("No availability thresholds configured; default {} / {} % used.".format(*DEFAULT_AVAILABILITY))
+    limits = _target_limits(ctx, "reachability")
     rows, total_reach, total_samples = [], 0.0, 0.0
     for ne, name in names.items():
         sample = (data.get("reach:" + str(ne)) or [{}])[0] if isinstance(data.get("reach:" + str(ne)), list) else {}
@@ -418,11 +502,12 @@ def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
     # Tunnel availability, derived: 1 - down seconds / sampled seconds; brownout is shown as a degraded share.
     tunnel_metrics, tunnel_rows, tunnel_status, always_down = [], [], [], []
+    separate = ctx["options"].get("down_tunnels") == "separate"
     for kind, key, label in (("overlay", "overlayAvailability", "Overlay"), ("underlay", "underlayAvailability", "Underlay")):
-        lim, _ = _limits(threshold, key)
+        lim = _target_limits(ctx, key)
         totals = {"seconds": 0.0, "down": 0.0, "brownout": 0.0}
         for ne, name in names.items():
-            t = _tunnel_totals(data.get("{}:{}".format(kind, ne)))
+            t = _tunnel_totals(data.get("{}:{}".format(kind, ne)), separate)
             for k in totals:
                 totals[k] += t[k]
             for row in t["always_down"]:
@@ -438,9 +523,11 @@ def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     notes = ["Derived from the Orchestrator's tunnel availability data as 1 - downtime / time sampled (samples are minutes, downtime is seconds); brownout is reported separately."]
     if len(tunnel_rows) > 25:
         notes.append("Worst 25 shown; {} more rows not shown.".format(len(tunnel_rows) - 25))
-    tunnel_metrics.append(metric("tunnel_groups_down_all_period", sum(int(r["tunnels"] or 1) for r in always_down), "tunnels", "Tunnels down for the whole period (not in the figures)"))
+    tunnel_metrics.append(metric("tunnel_groups_down_all_period", sum(int(r["tunnels"] or 1) for r in always_down), "tunnels",
+                                 "Tunnels down for the whole period ({})".format("left out of the figures" if separate else "included in the figures")))
     if always_down:
-        notes.append("Down for the whole period (up less than 1% of it), so left out of the figures above; often unused or decommissioned paths: "
+        notes.append("Down for the whole period (up less than 1% of it), {}; often unused or decommissioned paths: ".format(
+                     "so left out of the figures above (option: down tunnels separate)" if separate else "and counted in the figures above (option: down tunnels include)")
                      + "; ".join(" ".join([r["appliance"], r["kind"].lower()] + [str(x) for x in (r["label"], r["service"]) if x and x not in ("none", "unassigned")]
                                           + ["({} tunnel{})".format(r["tunnels"], "" if r["tunnels"] == 1 else "s")]) for r in always_down[:25])
                      + ("; and {} more".format(len(always_down) - 25) if len(always_down) > 25 else "") + ".")
@@ -450,6 +537,8 @@ def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     counts = {"CRITICAL": 0, "MAJOR": 0, "MINOR": 0, "WARNING": 0}
     alarm_rows: List[Dict[str, Any]] = []
     listed = data.get("appliance_alarms")
+    if isinstance(listed, list) and len(listed) >= MAX_ALARMS:
+        gaps.append("Alarms in the period: the list reached the {}-alarm cap, so the counts may be low.".format(MAX_ALARMS))
     if isinstance(listed, list):
         for alarm in listed:
             sev = str(alarm.get("severity") or "").upper()
@@ -470,9 +559,63 @@ def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     alarm_ids = [metric("alarms_" + sev.lower(), counts[sev] if have_alarms else None, "alarms", sev.title() + " alarms in the period") for sev in counts]
     sections["avail-alarms"] = {"status": alarm_status, "metrics": alarm_ids, "table": alarm_rows, "notes": ["Source: " + source + "."]}
 
-    availability_status = worst([sections["avail-appliances"]["status"], sections["avail-tunnels"]["status"]])
+    sections["avail-paths"] = _paths(ctx)
+    availability_status = worst([sections["avail-appliances"]["status"], sections["avail-tunnels"]["status"], sections["avail-paths"]["status"]])
     sections["avail-summary"] = {"status": availability_status, "metrics": [m_fleet, "overlay_avail_pct", "underlay_avail_pct", "alarms_critical", "appliances_total"]}
     return sections
+
+
+def _paths(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Loss (after FEC), latency, jitter and MOS per tunnel over the period, graded against GET /health/healthThresholdConfig.
+
+    Three kinds of tunnel: carrying traffic (loss % = lost / (received + lost)); near-idle but losing probes, which is a broken
+    path and is red, counted or listed apart as --down-tunnels says; and no packets and no probe loss at all (loss: no data)."""
+    data, names, metric, gaps = ctx["data"], ctx["names"], ctx["metric"], ctx["gaps"]
+    separate = ctx["options"].get("down_tunnels") == "separate"
+    rows, broken = [], []
+    for ne, name in names.items():
+        value = data.get("paths:" + str(ne))
+        for tunnel_id, per_ne in (value.items() if isinstance(value, dict) else []):
+            stats = per_ne.get(ne) if isinstance(per_ne, dict) else None
+            if not isinstance(stats, dict):
+                continue
+            received, lost = float(stats.get("SUM_WRX_PKTS") or 0), float(stats.get("SUM_POST_LOSS") or 0)
+            row = {"appliance": name, "tunnel": stats.get("alias") or tunnel_id, "kind": "underlay" if str(stats.get("overlayid")) == "0" else "overlay",
+                   "loss_pct": round(100.0 * lost / (received + lost), 3) if received >= MIN_LOSS_PACKETS or (received and not lost) else None,
+                   "latency_ms": float(stats["AVG_LATENCY_AVG"]) if isinstance(stats.get("AVG_LATENCY_AVG"), (int, float)) else None,
+                   "jitter_ms": float(stats["AVG_JITTER"]) if isinstance(stats.get("AVG_JITTER"), (int, float)) else None,
+                   "mos": round(stats["mos"] / 100.0, 2) if isinstance(stats.get("mos"), (int, float)) and stats["mos"] > 0 else None,  # tunnel aggregate MOS is x100
+                   "note": ""}
+            if received < MIN_LOSS_PACKETS and lost:
+                row["note"] = "no traffic, probes lost"
+                if separate:
+                    broken.append(row)
+                    continue
+            rows.append(row)
+    if not rows and not broken:
+        return {"status": "grey", "metrics": [metric("paths_measured", 0, "tunnels", "Tunnels with path statistics")], "notes": ["No tunnel statistics for the period."]}
+    limits = {key: health_limits(data, key, gaps) for key in ("packetLoss", "latency", "jitter", "mos")}
+    for row in rows + broken:
+        row["status"] = "red" if row["note"] else worst([band(row["loss_pct"], limits["packetLoss"], higher_is_better=False), band(row["latency_ms"], limits["latency"], higher_is_better=False),
+                                                          band(row["jitter_ms"], limits["jitter"], higher_is_better=False), band(row["mos"], limits["mos"])])
+    rows.sort(key=lambda r: (-("grey", "green", "amber", "red").index(r["status"]), -(r["loss_pct"] or 0), -(r["latency_ms"] or 0)))
+    red, amber = sum(r["status"] == "red" for r in rows), sum(r["status"] == "amber" for r in rows)
+    idle = sum(1 for r in rows if r["note"]) + len(broken)
+    notes = ["Each tunnel graded on loss after FEC, latency, jitter and MOS against the Orchestrator's health thresholds: loss {} / {} %, latency {} / {} ms, jitter {} / {} ms, MOS {} / {}.".format(
+        *(limits["packetLoss"] + limits["latency"] + limits["jitter"] + limits["mos"])),
+             "Under {} packets received in the period a loss % means little, so a tunnel that lost probes there is shown as \"no traffic, probes lost\" and counted red: "
+             "usually a broken path or a dead configuration.".format(MIN_LOSS_PACKETS)]
+    if broken:
+        notes.append("{} tunnels with no traffic and lost probes are listed apart and left out of the status (option: down tunnels separate): {}{}.".format(
+            len(broken), "; ".join("{} {}".format(r["appliance"], r["tunnel"]) for r in broken[:25]), "; and {} more".format(len(broken) - 25) if len(broken) > 25 else ""))
+    if len(rows) > 25:
+        notes.append("Worst 25 shown; {} more tunnels not shown.".format(len(rows) - 25))
+    return {"status": worst([r["status"] for r in rows]), "table": rows[:25], "notes": notes,
+            "metrics": [metric("paths_measured", len(rows), "tunnels", "Tunnels graded"),
+                        metric("paths_red", red, "tunnels", "Tunnels outside the health thresholds", "red" if red else "green"),
+                        metric("paths_amber", amber, "tunnels", "Tunnels between the health thresholds", "amber" if amber else "green"),
+                        metric("paths_idle_probe_loss", idle, "tunnels", "Tunnels with no traffic and lost probes ({})".format("left out" if separate else "counted red"),
+                               None if separate else ("red" if idle else "green"))]}
 
 
 def _noc(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -498,6 +641,8 @@ def _noc(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     per_ne: Dict[Any, Dict[str, int]] = {}
     rows: List[Dict[str, Any]] = []
     active = data.get("active_alarms")
+    if isinstance(active, list) and len(active) >= MAX_ALARMS:
+        gaps.append("Active alarms: the list reached the {}-alarm cap, so the counts may be low.".format(MAX_ALARMS))
     if isinstance(active, list):
         for alarm in active:
             sev = str(alarm.get("severity") or "").lower()
@@ -512,10 +657,14 @@ def _noc(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         source = "POST /alarm/appliance (active)"
     else:
         summary = data.get("alarm_summary") if isinstance(data.get("alarm_summary"), dict) else None
-        sev_counts = {sev: summary.get("numOf{}Alarms".format(sev.title())) if summary else None for sev in sev_counts}
-        for item in data.get("alarm_counts") or []:
+        counts = data.get("alarm_counts")
+        for item in counts if isinstance(counts, list) else []:
             if isinstance(item, dict) and item.get("applianceId") in names:
                 per_ne[item["applianceId"]] = {sev: int(item.get("numOf{}Alarms".format(sev.title())) or 0) for sev in ("critical", "major", "minor", "warning")}
+        if isinstance(counts, list):  # only the appliances in scope; GET /alarm/summary is network-wide
+            sev_counts = {sev: sum(c.get(sev, 0) for c in per_ne.values()) for sev in sev_counts}
+        else:
+            sev_counts = {sev: summary.get("numOf{}Alarms".format(sev.title())) if summary else None for sev in sev_counts}
         rows = [{"appliance": names[ne], "critical": c.get("critical", 0), "major": c.get("major", 0), "minor": c.get("minor", 0), "warning": c.get("warning", 0)}
                 for ne, c in sorted(per_ne.items(), key=lambda i: (-i[1].get("critical", 0), -i[1].get("major", 0)))][:15]
         source = "GET /alarm/summary and GET /alarm/count/appliance (counts only; the alarm list needs the read POST)"
@@ -601,6 +750,11 @@ def metrics_status(ctx: Dict[str, Any], mid: str) -> str:
 def _capacity(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     data, names, metric, gaps = ctx["data"], ctx["names"], ctx["metric"], ctx["gaps"]
     links = wan_links(data, names)
+    basis = data.get("capacity_basis") or {"granularity": "hour", "retention_known": True}
+    bucket = 86400 if basis.get("granularity") == "day" else 3600
+    if not basis.get("retention_known"):
+        gaps.append("Capacity: hourly retention not readable from GET /gms/stats/retention; {:g} days assumed.".format(HOURLY_RETENTION / 86400))
+    limits = health_limits(data, "bwUtilization", gaps) if links else DEFAULT_HEALTH["bwUtilization"]
     rows = []
     for link in links:
         hourly = data.get("hourly:{}:{}".format(link["nePk"], link["interface"]))
@@ -608,7 +762,7 @@ def _capacity(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         for row in hourly if isinstance(hourly, list) else []:
             # Each hourly row carries the configured bandwidth (kbps) at that time.
             for values, key, bw in ((tx, "tx_bytes", "max_bw_tx"), (rx, "rx_bytes", "max_bw_rx")):
-                pct = _util(float(row.get(key) or 0), 3600, float(row.get(bw) or 0))
+                pct = _util(float(row.get(key) or 0), bucket, float(row.get(bw) or 0))
                 if pct is not None:
                     values.append(pct)
         p95_tx, p95_rx = _p95(tx), _p95(rx)
@@ -616,7 +770,7 @@ def _capacity(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         rows.append({"appliance": names.get(link["nePk"], link["nePk"]), "interface": link["interface"], "label": link["label"],
                      "outbound_mbps": round(link["bw_tx"] / 1000, 1), "inbound_mbps": round(link["bw_rx"] / 1000, 1),
                      "avg_out_pct": link["avg_tx_pct"], "avg_in_pct": link["avg_rx_pct"], "p95_out_pct": p95_tx, "p95_in_pct": p95_rx,
-                     "hours": max(len(tx), len(rx)), "status": _load_status(peak)})
+                     "buckets": max(len(tx), len(rx)), "status": _load_status(peak, limits)})
     measured = [r for r in rows if r["status"] != "grey"]
     flagged = [r for r in measured if r["status"] in ("amber", "red")]
     worst_p95 = max([max(v for v in (r["p95_out_pct"], r["p95_in_pct"]) if v is not None) for r in measured], default=None)
@@ -624,16 +778,17 @@ def _capacity(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     rows.sort(key=lambda r: (r["status"] == "grey", -max(r["p95_out_pct"] or 0, r["p95_in_pct"] or 0), -max(r["avg_out_pct"] or 0, r["avg_in_pct"] or 0)))
     if not links:
         gaps.append("Capacity: no WAN interfaces found (POST /stats/aggregate/interface, or GET /stats/timeseries/interfaceOverlay under GET-only).")
-    notes = ["P95 of hourly averages over the last {:g} days of the period at most (hourly retention); hourly averages understate short bursts.".format(HOURLY_RETENTION / 86400),
-             "Outbound = WAN Tx, inbound = WAN Rx, against the configured bandwidth. Rule: P95 at or above 80% is amber, 95% red.",
+    window = "P95 of hourly averages over the part of the period inside hourly retention; hourly averages understate short bursts." if bucket == 3600 else \
+        "P95 of daily averages: the period is older than the hourly data the Orchestrator keeps, and daily averages understate peaks much more than hourly ones."
+    notes = [window, "Outbound = WAN Tx, inbound = WAN Rx, against the configured bandwidth. Rule: P95 at or above {:g}% is amber, {:g}% red (bwUtilization limits).".format(*sorted(limits)),
              "Links ranked by average utilisation from {}; only the top ones get a P95, the rest stay grey.".format(links[0]["source"] if links else "the interface totals")]
     if len(rows) > 30:
         notes.append("{} more links not shown.".format(len(rows) - 30))
-    m_flag = metric("links_flagged", len(flagged) if measured else None, "links", "WAN links at or above 80% P95", status)
+    m_flag = metric("links_flagged", len(flagged) if measured else None, "links", "WAN links at or above {:g}% P95".format(min(limits)), status)
     sections = {"cap-links": {"status": status, "metrics": [m_flag], "table": rows[:30], "notes": notes,
                               "chart": {"title": "Highest WAN P95 utilisation, % of configured bandwidth", "zoom": False,
                                         "points": [("{} {}".format(r["appliance"], r["interface"]), max(r["p95_out_pct"] or 0, r["p95_in_pct"] or 0), r["status"]) for r in rows if r["status"] != "grey"][:20]}}}
-    sections["cap-summary"] = {"status": status, "metrics": [m_flag, metric("worst_p95_pct", worst_p95, "%", "Highest WAN P95 utilisation", _load_status(worst_p95)),
+    sections["cap-summary"] = {"status": status, "metrics": [m_flag, metric("worst_p95_pct", worst_p95, "%", "Highest WAN P95 utilisation", _load_status(worst_p95, limits)),
                                                              metric("links_measured", len(measured), "links", "WAN links with a P95"),
                                                              metric("wan_links", len(links), "links", "WAN links found")]}
     return sections
@@ -671,9 +826,9 @@ def _lifecycle(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                 lic_rows.append({"appliance": names[item["applianceId"]], "days_left": left})
     have = isinstance(days, int) or isinstance(portal, dict)
     worst_days = min([d for d in [days] + [r["days_left"] for r in lic_rows] if isinstance(d, int)], default=None)
-    lic_status = "grey" if not have else "red" if worst_days is not None and worst_days <= 30 else "amber" if worst_days is not None and worst_days <= 90 else "green"
+    lic_status = "grey" if not have else "green" if worst_days is None else _expiry_status(worst_days)
     sections["life-licences"] = {"status": lic_status, "table": sorted(lic_rows, key=lambda r: r["days_left"]),
-                                 "metrics": [metric("license_days_left", days, "days", "Days until the Orchestrator licence expires", band(days, (30, 90)) if isinstance(days, int) else None),
+                                 "metrics": [metric("license_days_left", days, "days", "Days until the Orchestrator licence expires", _expiry_status(days) if isinstance(days, int) else None),
                                              metric("license_used", lic.get("usedAppliances") if lic else None, "appliances", "Licensed appliances in use"),
                                              metric("licences_expiring_90", expiring[90] if isinstance(portal, dict) else None, "appliances", "Appliance licences expiring within 90 days"),
                                              metric("licences_expiring_30", expiring[30] if isinstance(portal, dict) else None, "appliances", "Appliance licences expiring within 30 days")],
@@ -746,11 +901,11 @@ def validate(metrics: Mapping[str, Any], narrative: Any) -> List[str]:
             if mid not in metrics["metrics"]:
                 problems.append("{}: {{{{m:{}}}}} is not a metric".format(sid, mid))
         prose = _TOKEN.sub(" ", text)
-        if re.search(r"\d", prose):
+        if re.search(r"\d", _FIXED_TERMS.sub(" ", prose)):
             problems.append("{}: bare number in the text; cite numbers only as {{{{m:<metric id>}}}}: {!r}".format(sid, re.search(r".{0,20}\d.{0,20}", prose).group(0)))
         if "{{" in prose or "}}" in prose:
             problems.append("{}: malformed token; use {{{{m:<metric id>}}}}".format(sid))
-        lowered = prose.lower()
+        lowered = _SEVERITY_NOUNS.sub(" ", prose.lower())  # "a critical alarm" names a severity, not a status
         for status, words in _STATUS_WORDS.items():
             if status != computed and any(re.search(r"\b" + re.escape(w) + r"\b", lowered) for w in words):
                 problems.append("{}: wording implies {} but the computed status is {}".format(sid, status, computed))
@@ -777,11 +932,11 @@ svg{width:100%;height:auto;margin-top:8px}svg text{fill:var(--fg);font-size:11px
 .verdict{border:2px solid currentColor;border-radius:8px;padding:12px 16px;margin:16px 0;font-weight:600}
 @media print{@page{size:A4;margin:14mm}:root{--bg:#fff;--fg:#111;--muted:#555;--card:#fff;--line:#ccc;--green:#1a7f37;--amber:#9a6700;--red:#cf222e;--grey:#57606a;--bar:#0969da}main{max-width:none;padding:0}}
 </style></head><body><main>
-<header><h1>$title</h1><div class="meta">$subtitle</div></header>
+<header><h1>$title</h1><div class="meta">$subtitle</div><div class="meta" data-section-id="report-options">$options</div></header>
 $headline
 $banner
 $sections
-<footer><p>Orchestrator $orchestrator, release $version. Data collected $collected for $period. Coverage: $coverage. Bundle SHA-256 $bundle. Generated by edgeconnect-mcp $generator; numbers and statuses are computed by code, the prose only cites them.</p></footer>
+<footer><p>Orchestrator $orchestrator, release $version. Data collected $collected for $period. Coverage: $coverage. $options. Bundle SHA-256 $bundle. Generated by edgeconnect-mcp $generator; numbers and statuses are computed by code, the prose only cites them.</p></footer>
 </main></body></html>
 """)
 
@@ -830,6 +985,20 @@ def _table(rows: List[Mapping[str, Any]]) -> str:
     return "<table><thead><tr>{}</tr></thead><tbody>{}</tbody></table>".format(head, body)
 
 
+def options_line(metrics: Mapping[str, Any]) -> str:
+    """Report options: what the reader needs to know was chosen, for example "down tunnels: separate (37 excluded)"."""
+    o = dict(DEFAULT_OPTIONS, **(metrics.get("options") or {}))
+    scope = "all ({} appliances)".format((metrics.get("coverage") or {}).get("appliances")) if o["scope"] == "all" else ", ".join(o["scope"])
+    target = "Orchestrator thresholds" if o["target"] == "orchestrator" else "{}%".format(o["target"])
+    parts = ["period: {}{}".format(o["period"], " ({})".format(o.get("month")) if metrics["report"] not in ("noc", "lifecycle") else ""), "scope: " + scope]
+    if metrics["report"] in ("availability", "executive"):
+        count = o.get("down_tunnels_count")
+        parts += ["availability target: " + target,
+                  "down tunnels: {}{}".format(o["down_tunnels"], " ({} down all period and {} idle tunnels losing probes excluded)".format(count, o.get("idle_paths_count") or 0)
+                                              if o["down_tunnels"] == "separate" and count is not None else "")]
+    return "Report options: " + "; ".join(parts)
+
+
 def render(metrics: Mapping[str, Any], narrative: Optional[Mapping[str, Any]] = None) -> str:
     if narrative is not None:
         problems = validate(metrics, narrative)
@@ -848,7 +1017,7 @@ def render(metrics: Mapping[str, Any], narrative: Optional[Mapping[str, Any]] = 
         chart = _chart(sec.get("chart") or {})
         parts.append('<section data-section-id="{0}"><h2>{1}</h2><div class="status {2}">Status: {3}</div>{4}<div class="kpis">{5}</div>{6}{7}{8}</section>'.format(
             sid, html.escape(titles[sid]), sec["status"], sec["status"].title(), "<p>{}</p>".format(text) if text else "", kpis, chart, _table(sec.get("table") or []), notes))
-    banner = '<div class="banner" data-section-id="stats-store-down">Statistics store down: every statistics call returned HTTP 500, so availability numbers are missing.</div>' if metrics.get("stats_store_down") else ""
+    banner = '<div class="banner" data-section-id="stats-store-down">Statistics store down: every statistics call returned HTTP 500, so statistics are missing.</div>' if metrics.get("stats_store_down") else ""
     coverage = metrics.get("coverage") or {}
     head = metrics.get("headline")
     headline = ""
@@ -862,7 +1031,7 @@ def render(metrics: Mapping[str, Any], narrative: Optional[Mapping[str, Any]] = 
     return PAGE.substitute(
         title=html.escape("{}, {}".format(TITLES[metrics["report"]], period)),
         subtitle=html.escape("Orchestrator {} · {}".format(metrics["orchestrator"], period)),
-        headline=headline, banner=banner, sections="\n".join(parts), orchestrator=html.escape(str(metrics["orchestrator"])), version=html.escape(str(metrics.get("orchestrator_version"))),
+        options=html.escape(options_line(metrics)), headline=headline, banner=banner, sections="\n".join(parts), orchestrator=html.escape(str(metrics["orchestrator"])), version=html.escape(str(metrics.get("orchestrator_version"))),
         collected=html.escape(str(metrics["collected_at"])), period=html.escape(period),
         coverage=html.escape("{} of {} appliances returned data in a per-appliance read".format(coverage.get("with_data"), coverage.get("appliances"))),
         bundle=html.escape(str(metrics.get("bundle_sha256"))), generator=html.escape(__version__))
@@ -884,11 +1053,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("collect", help="read the Orchestrator and write bundle.json")
     p.add_argument("--orchestrator", required=True)
     p.add_argument("--report", choices=REPORTS, required=True)
-    p.add_argument("--month", default=datetime.now(timezone.utc).strftime("%Y-%m"), help="YYYY-MM (default: this month to date)")
-    p.add_argument("--appliances", help="comma-separated nePks or host names (default: all)")
+    p.add_argument("--period", choices=OPTIONS["period"], default=DEFAULT_OPTIONS["period"], help="availability and capacity period (default: last-month)")
+    p.add_argument("--month", help="YYYY-MM: an explicit month instead of --period")
+    p.add_argument("--scope", default="all", help="all (default), or comma-separated nePks or host names that this Orchestrator has")
+    p.add_argument("--target", choices=OPTIONS["target"], default=DEFAULT_OPTIONS["target"], help="availability target: the Orchestrator's thresholds (default) or a fixed %%")
+    p.add_argument("--down-tunnels", choices=OPTIONS["down_tunnels"], default=DEFAULT_OPTIONS["down_tunnels"],
+                   help="tunnels down the whole period: include them in the figures (default) or list them separately")
     p.add_argument("--top", type=int, default=20, help="capacity: WAN links that get an hourly P95 read, busiest first (default 20)")
     p.add_argument("--out", type=Path, default=Path("."), help="folder for bundle.json")
-    p.add_argument("--dotenv")
+    p.add_argument("--dotenv", default=os.environ.get("EDGECONNECT_DOTENV"), help="settings file (default: $EDGECONNECT_DOTENV, else ~/.edgeconnect-mcp/.env, else ./.env)")
     for name, help_text in (("compute", "bundle.json -> metrics.json"), ("template", "metrics.json -> narrative skeleton")):
         q = sub.add_parser(name, help=help_text)
         q.add_argument("input", type=Path)
@@ -905,7 +1078,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             dotenv = args.dotenv or next((str(path) for path in (HOME_DOTENV, Path(".env")) if path.is_file()), None)
             server = Server.from_dotenv(dotenv)
             server.log = lambda line: None
-            bundle = collect(server, args.orchestrator, args.report, args.month, [a.strip() for a in args.appliances.split(",")] if args.appliances else None, top=args.top)
+            scope = None if args.scope.strip().lower() == "all" else [a.strip() for a in args.scope.split(",") if a.strip()]
+            bundle = collect(server, args.orchestrator, args.report, args.month, scope, top=args.top, period=args.period, target=args.target, down_tunnels=args.down_tunnels)
             bundle["sha256"] = hashlib.sha256(json.dumps(bundle, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
             args.out.mkdir(parents=True, exist_ok=True)
             _dump(args.out / "bundle.json", bundle)
