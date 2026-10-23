@@ -24,6 +24,9 @@ SPEC = {
         "/thirdPartyServices/zscaler/legacy": {"post": {"summary": "Set legacy text", "consumes": ["text/plain"]}},
         "/ipObjects/addressGroup/{name}": {"put": {"summary": "Update address group"}},
         "/logging/remoteReceiver": {"post": {"summary": "Set remote log receiver"}},
+        "/alarm/appliance": {"post": {"summary": "Retrieve appliance alarms for specified appliances"}},
+        "/stats/aggregate/interface": {"post": {"summary": "Retrieve aggregated interface statistics"}},
+        "/health": {"post": {"summary": "Get health summary for appliances over a time range"}},
         "/ipObjects/addressGroup": {"get": {"summary": "List address groups"}, "post": {"summary": "Create address group", "parameters": [{"in": "body", "name": "body", "schema": {"$ref": "#/definitions/Group"}}]}},
     },
     "definitions": {
@@ -71,7 +74,7 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(init["result"]["protocolVersion"], "2025-06-18")
         self.assertIsNone(self.server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
         names = [tool["name"] for tool in self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]]
-        self.assertEqual(names, ["list_orchestrators", "find_operations", "describe_operation", "api_get", "api_write"])
+        self.assertEqual(names, ["list_orchestrators", "find_operations", "describe_operation", "api_get", "api_read_post", "api_write"])
 
     def test_modern_requests_are_stateless_and_carry_metadata(self):
         meta = {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}}
@@ -81,7 +84,7 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual((discover["resultType"], discover["capabilities"], discover["cacheScope"]), ("complete", {"tools": {}}, "private"))
         self.assertEqual(discover["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "edgeconnect-orchestrator")
         listed = modern("tools/list")["result"]  # no initialize first
-        self.assertEqual((len(listed["tools"]), listed["ttlMs"], listed["resultType"]), (5, 0, "complete"))
+        self.assertEqual((len(listed["tools"]), listed["ttlMs"], listed["resultType"]), (6, 0, "complete"))
         called = modern("tools/call", name="list_orchestrators", arguments={})["result"]
         self.assertEqual((called["isError"], called["resultType"]), (False, "complete"))
         self.assertNotIn("ttlMs", called)
@@ -111,7 +114,7 @@ class McpServerTest(unittest.TestCase):
         # Every string property the 9.7.1 spec describes as a password, secret, key, community string or credential.
         secret = ["rocommunity", "trap_community", "accountKey", "oldAccountKey", "oldKey", "pre_shared_key", "presharedKey", "primaryKey",
                   "secondaryKey", "privacy_key", "storageAccountKey", "keyData", "key", "vpnCredential", "barcodeBase64Jpeg", "clientSecret",
-                  "apiKey", "password", "authKey", "ike_psk"]
+                  "apiKey", "password", "authKey", "ike_psk", "licenseKey"]
         readable = ["community", "set_community", "resourceKey", "keySize", "hash_type", "authType", "name", "monkey"]
         self.prod_client.body = json.dumps({key: "value-" + key for key in secret + readable}).encode()
         _, text = self.call("api_get", path="/appliance")
@@ -196,6 +199,32 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(len(self.lab_client.calls), sent)
         self.assertEqual(self.prod_client.calls, [])
 
+    def test_only_the_three_read_posts_run_as_reads(self):
+        body = {"nePks": ["1.NE"]}
+        for path in ("/alarm/appliance", "/stats/aggregate/interface", "/health"):  # prod has writes off
+            error, text = self.call("api_read_post", path=path, query={"view": "active"}, body=body)
+            self.assertFalse(error, text)
+        self.assertEqual(self.prod_client.calls, [("POST", path, {"view": "active"}, body) for path in ("/alarm/appliance", "/stats/aggregate/interface", "/health")])
+        error, text = self.call("api_read_post", path="/ipObjects/addressGroup", body={"name": "g"})  # any other POST stays a write
+        self.assertTrue(error)
+        self.assertIn("only runs", text)
+        error, text = self.call("api_write", method="POST", path="/health", body=body)
+        self.assertTrue(error)
+        self.assertIn("prod_mcp_writes", text)
+        self.assertTrue(self.call("api_read_post", path="/health", body=["1.NE"])[0])
+        read_token = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "api_read_post", "arguments": {"path": "/health", "body": body}}}, read_only=True)
+        self.assertFalse(read_token["result"]["isError"])
+        self.server.orchestrators["prod"].get_only = True
+        for path in ("/alarm/appliance", "/stats/aggregate/interface", "/health"):
+            error, text = self.call("api_read_post", path=path, body=body)
+            self.assertTrue(error)
+            self.assertIn("prod_mcp_get_only", text)
+        self.assertEqual(len(self.prod_client.calls), 4)
+        self.assertEqual({o["name"]: o["read_posts_enabled"] for o in json.loads(self.call("list_orchestrators")[1])}, {"lab": True, "prod": False})
+        dotenv = Path(self.tmp.name) / "g.env"
+        dotenv.write_text("orch_1=a\na_base_url=https://192.0.2.1\na_api_key=k\na_mcp_get_only=true\norch_2=b\nb_base_url=https://192.0.2.2\nb_api_key=k\nmcp_audit_log=off\n")
+        self.assertEqual({name: o.get_only for name, o in Server.from_dotenv(str(dotenv)).orchestrators.items()}, {"a": True, "b": False})
+
     def test_list_orchestrators_never_shows_keys(self):
         error, text = self.call("list_orchestrators")
         self.assertFalse(error)
@@ -204,7 +233,7 @@ class McpServerTest(unittest.TestCase):
 
     def test_find_and_describe(self):
         _, text = self.call("find_operations", query="appliance")
-        self.assertEqual(json.loads(text)["total_matches"], 4)
+        self.assertEqual(json.loads(text)["total_matches"], 6)
         _, text = self.call("describe_operation", method="POST", path="/ipObjects/addressGroup")
         self.assertIn('"name"', text)  # $ref resolved
         self.assertIn('"includedIPs"', text)  # nested $ref resolved
