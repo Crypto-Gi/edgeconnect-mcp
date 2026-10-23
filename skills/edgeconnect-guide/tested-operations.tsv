@@ -1,4 +1,4 @@
-# Every operation the edgeconnect-guide skill names. Each one returned a passing result between 2026-10-16 and 2026-10-20 on Orchestrator 9.7.1.42046
+# Every operation the edgeconnect-guide skill names, plus a few reads the report skill added. Each one returned a passing result between 2026-10-16 and 2026-10-23 on Orchestrator 9.7.1.42046
 # (a lab with ECOS 9.6.2.1 appliances, and a single-appliance production network on ECOS 9.6.4.0 using test objects only); some reads also on Orchestrator 10.0.0.
 # scripts/check_links.py fails when a card or playbook names an operation that is not listed here.
 method	path

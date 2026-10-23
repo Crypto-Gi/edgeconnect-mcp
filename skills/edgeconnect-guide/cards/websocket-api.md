@@ -22,7 +22,7 @@ The Orchestrator Notification Service over a websocket: a client subscribes to o
 - Create the receiver: `POST /remoteLogReceiver` (array body, no `id`; the reply is the list of new ids). Update with `PUT /remoteLogReceiver` (send the object as read); delete with `DELETE /remoteLogReceiver` (`receiverId` query).
 - Read: `GET /remoteLogReceiver` (optional `receiverId`), `GET /remoteLogReceiver/websocket/status` (connection state, client IP, last ping and message times), `GET /remoteLogReceiver/sequenceId/latest` (needs `logType`).
 - Replay: `POST /remoteLogReceiver/subscribe` (`receiverId` query; body `{"id": ["<id>"], "logType": 0}`).
-- Opening the websocket and sending `ACTIVE_ALARMS` or `RESUBMISSION` messages is not available through the MCP server. Poll alarms with `POST /alarm/appliance` (body `nePks`) and `GET /alarm/gms` instead (see alarms-monitoring).
+- Opening the websocket and sending `ACTIVE_ALARMS` or `RESUBMISSION` messages is not available through the MCP server. Poll alarms with `POST /alarm/appliance` (with `api_read_post`; body `nePks`) and `GET /alarm/gms` instead (see alarms-monitoring).
 ## Gotchas
 - Creating the receiver only opens the endpoint; use the websocket status call to confirm a client is actually attached.
 - Sequence IDs are per receiver, so keep each consumer's last ID with that receiver's `id`.
