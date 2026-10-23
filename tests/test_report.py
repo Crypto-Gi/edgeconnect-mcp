@@ -2,10 +2,11 @@ import json
 import re
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from edgeconnect_mcp import report
+from edgeconnect_mcp.history import History
 from edgeconnect_mcp.config import Config
 from edgeconnect_mcp.server import Orchestrator, Server
 
@@ -430,7 +431,7 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_validator_allows_severity_names_and_fixed_terms(self):
         metrics = report.compute(bundle())  # avail-summary is amber
-        ok = {"report": "availability", "sections": {"avail-summary": {"text": "One critical alarm and a warning alarm were raised; P95 over the last 24 hours stayed low on ECOS 9.6.2 and the last 7 days."}}}
+        ok = {"report": "availability", "sections": {"avail-summary": {"text": "A critical alarm and a warning alarm were raised; P95 over the last 24 hours stayed low on ECOS 9.6.2 and the last 7 days."}}}
         self.assertEqual(report.validate(metrics, ok), [])
         bad = {"report": "availability", "sections": {"avail-summary": {"text": "Reachability was 99 percent; there was an outage."}}}
         problems = " ".join(report.validate(metrics, bad))
@@ -577,7 +578,8 @@ AUDIT = [{"id": 1, "queuedTime": T0 - 3600000, "user": "admin", "name": "Apply A
 ALARMS = [{"id": 10, "applianceId": "1.NE", "severity": "CRITICAL", "name": "TUNNEL_DOWN", "description": "Tunnel down", "timeOccurredInMills": T0 + 60000, "clearedTimeInMills": T0 + 1260000},
           {"id": 11, "applianceId": "1.NE", "severity": "MAJOR", "name": "LINK", "description": "Link down", "timeOccurredInMills": T0 - 7200000},  # open since before
           {"id": 12, "applianceId": "2.NE", "severity": "MINOR", "name": "OLD", "description": "cleared before", "timeOccurredInMills": T0 - 7200000, "clearedTimeInMills": T0 - 3600000},
-          {"id": 13, "applianceId": "1.NE", "severity": "CRITICAL", "name": "BAD_IP", "description": "raised days before, still open", "timeOccurredInMills": T0 - 3 * 86400000}]
+          {"id": 13, "applianceId": "1.NE", "severity": "CRITICAL", "name": "BAD_IP", "description": "raised days before, still open", "timeOccurredInMills": T0 - 3 * 86400000},
+          {"id": 14, "applianceId": "1.NE", "severity": "MAJOR", "name": "STANDING", "description": "raised a month before, still open", "timeOccurredInMills": T0 - 30 * 86400000}]
 
 
 class WindowClient(RoutedClient):
@@ -591,6 +593,8 @@ class WindowClient(RoutedClient):
             return json.dumps(rows[:q["limit"]]).encode()  # newest first, cut at the limit
         if path == "/alarm/appliance":
             self.calls.append((method, path, q, kwargs.get("json_body")))
+            if q.get("view") == "active":
+                return json.dumps([a for a in ALARMS if not a.get("clearedTimeInMills")]).encode()
             return json.dumps([a for a in ALARMS if q["from"] <= a["timeOccurredInMills"] <= q["to"]]).encode()
         if path == "/alarm/correlatedAlarms":  # GET-only alarm list: closed ones carry no clear time
             self.calls.append((method, path, q, None))
@@ -619,9 +623,10 @@ class IncidentTests(CollectTests):
         client, b = self.collect("incident", window=(start, datetime.fromtimestamp(T0 / 1000 + 3600, timezone.utc)))
         m = report.compute(b)
         timeline = m["sections"]["inc-timeline"]["table"]
-        self.assertEqual([r["alarm"] for r in timeline], ["BAD_IP", "LINK", "TUNNEL_DOWN"])  # open in the window, even if raised days before; the one cleared before is out
+        # raised in the window first, then those already open (even a month-old one, from the open-now read); the one cleared before is out
+        self.assertEqual([r["alarm"] for r in timeline], ["TUNNEL_DOWN", "STANDING", "BAD_IP", "LINK"])
         v = {k: m["metrics"][k]["value"] for k in ("inc_alarms", "inc_critical", "inc_open_at_end", "inc_median_clear_min", "inc_changes_before", "inc_changes_during", "inc_affected")}
-        self.assertEqual(v, {"inc_alarms": 3, "inc_critical": 2, "inc_open_at_end": 2, "inc_median_clear_min": 20.0, "inc_changes_before": 1, "inc_changes_during": 2, "inc_affected": 1})
+        self.assertEqual(v, {"inc_alarms": 4, "inc_critical": 2, "inc_open_at_end": 3, "inc_median_clear_min": 20.0, "inc_changes_before": 1, "inc_changes_during": 2, "inc_affected": 1})
         self.assertEqual(m["sections"]["inc-appliances"]["table"][0]["reachable_pct"], 83.333)  # 10 of 60 minutes unreachable
         self.assertEqual(m["sections"]["inc-summary"]["status"], "red")
         self.assertIn("does not say whether any change caused", " ".join(m["sections"]["inc-changes"]["notes"]))
@@ -640,6 +645,12 @@ class IncidentTests(CollectTests):
             m = report.compute(b)
         self.assertEqual([c[2]["limit"] for c in client.calls if c[1] == "/action"], [2])  # one live page, never stored
         self.assertEqual(len(m["sections"]["inc-changes"]["table"]), 2)
+        # the full page reached back only to 10 minutes into the window: neither count is known, so neither is shown as a number
+        self.assertEqual((m["metrics"]["inc_changes_before"]["value"], m["metrics"]["inc_changes_during"]["value"]), (None, None))
+        with mock.patch.object(report, "AUDIT_PAGE", 3):  # this page reaches back before the window: "during" is complete
+            _, b = self.collect("incident", window=(start, datetime.fromtimestamp(T0 / 1000 + 3600, timezone.utc)))
+            m = report.compute(b)
+        self.assertEqual((m["metrics"]["inc_changes_before"]["value"], m["metrics"]["inc_changes_during"]["value"]), (None, 2))
         self.assertIn("busy audit log", " ".join(m["sections"]["data-gaps"]["notes"]))
         self.assertIn("remote log receiver", " ".join(m["sections"]["data-gaps"]["notes"]))
         self.assertFalse((self.store / "lab" / "audit").exists())
@@ -648,14 +659,35 @@ class IncidentTests(CollectTests):
         start = datetime.fromtimestamp(T0 / 1000, timezone.utc)
         client, b = self.collect("incident", get_only=True, appliances=["branch-a"], window=(start, datetime.fromtimestamp(T0 / 1000 + 3600, timezone.utc)))
         self.assertFalse([c for c in client.calls if c[0] == "POST"])
-        self.assertEqual(sorted(c[2]["view"] for c in client.calls if c[1] == "/alarm/correlatedAlarms"), ["active", "closed"])
+        self.assertEqual({c[2]["view"] for c in client.calls if c[1] == "/alarm/correlatedAlarms"}, {"active", "closed"})
         self.assertEqual([c[2].get("appliance") for c in client.calls if c[1] == "/action"], ["1.NE"])  # one page per scoped appliance
         m = report.compute(b)
         rows = {r["alarm"]: r for r in m["sections"]["inc-timeline"]["table"]}
-        self.assertEqual(set(rows), {"BAD_IP", "LINK", "TUNNEL_DOWN"})  # OLD was closed before the window: raised outside it, so left out
+        self.assertEqual(set(rows), {"BAD_IP", "LINK", "TUNNEL_DOWN", "STANDING"})  # OLD was closed before the window: raised outside it, so left out
         self.assertEqual((rows["TUNNEL_DOWN"]["cleared"], rows["TUNNEL_DOWN"]["minutes_to_clear"]), ("closed, time not given", None))
-        self.assertEqual(m["metrics"]["inc_open_at_end"]["value"], 2)
+        self.assertIsNone(m["metrics"]["inc_open_at_end"]["value"])  # closed correlated alarms carry no clear time
+        self.assertIn("correlated alarm list", " ".join(m["sections"]["data-gaps"]["notes"]))
         self.assertEqual({r["action"] for r in m["sections"]["inc-changes"]["table"]}, {"Apply Appliance Template", "Segment Security Policy Changed"})
+
+    def test_incident_limits_are_refused_or_named(self):
+        start = datetime.fromtimestamp(T0 / 1000, timezone.utc)
+        with self.assertRaisesRegex(ValueError, "at most 7 days"):
+            self.collect("incident", window=(start, datetime.fromtimestamp(T0 / 1000 + 8 * 86400, timezone.utc)), now=datetime.fromtimestamp(T0 / 1000 + 9 * 86400, timezone.utc))
+        from unittest import mock
+        with mock.patch.object(report, "INCIDENT_MAX_APPLIANCES", 1):
+            with self.assertRaisesRegex(ValueError, "at most 1"):
+                self.collect("incident", appliances=["branch-a", "branch-b<script>"], window=(start, datetime.fromtimestamp(T0 / 1000 + 3600, timezone.utc)))
+            client, b = self.collect("incident", window=(start - timedelta(days=1), datetime.fromtimestamp(T0 / 1000 + 3600, timezone.utc)))
+            b["data"]["incident_dropped"] = 1
+            self.assertIn("1 more appliances had alarms", " ".join(report.compute(b)["sections"]["data-gaps"]["notes"]))
+        with self.assertRaisesRegex(ValueError, "no clear time"):
+            self.collect("incident", get_only=True, alarm_id="10")  # closed in the GET list, which gives no clear time
+
+    def test_median_time_to_clear(self):
+        b = bundle(incident={"from_ms": T0, "to_ms": T0 + 3600000, "affected": []}, incident_alarms_stored=True,
+                   incident_alarms=[{"id": i, "applianceId": "1.NE", "severity": "MAJOR", "timeOccurredInMills": T0, "clearedTimeInMills": T0 + m * 60000} for i, m in ((1, 10), (2, 30))])
+        b["report"] = "incident"
+        self.assertEqual(report.compute(b)["metrics"]["inc_median_clear_min"]["value"], 20.0)
 
     def test_incident_window_from_an_alarm_id_and_required_inputs(self):
         client, b = self.collect("incident", alarm_id="10")
@@ -672,8 +704,70 @@ class IncidentTests(CollectTests):
         with mock.patch.object(report.Server, "from_dotenv", return_value=server), mock.patch("sys.stdout") as out:
             code = report.main(["store", "--orchestrator", "lab", "--history", str(self.store)])
         self.assertEqual(code, 0)
+        cov = json.loads((self.store / "lab" / "coverage.json").read_text())["alarms"]
+        self.assertEqual(len(cov), 1)
+        self.assertAlmostEqual((cov[0][1] - cov[0][0]) / 86400000, 7, delta=0.01)  # the 7 days the Orchestrator keeps, all read
         self.assertFalse((self.store / "lab" / "audit").exists())  # the audit log is never stored
         self.assertIn("alarms", json.loads((self.store / "lab" / "coverage.json").read_text()))  # last 7 days read (none in the fixture are that recent)
+
+
+class ReviewRound3Tests(unittest.TestCase):
+    def test_number_words_are_figures(self):
+        metrics = report.compute(bundle())
+        for text in ("Two appliances lost five tunnels.", "Reachability was ninety percent.", "About half the sites."):
+            problems = report.validate(metrics, {"report": "availability", "sections": {"avail-summary": {"text": text}}})
+            self.assertIn("bare number", " ".join(problems), text)
+        self.assertEqual(report.validate(metrics, {"report": "availability", "sections": {"avail-summary": {"text": "Someone noticed none of it."}}}), [])
+
+    def test_licences_with_no_expiry_read_are_grey(self):
+        m = report.compute(phase2_bundle("lifecycle", gms_license={}, portal_appliances={"data": [{"applianceId": "1.NE"}]}))
+        self.assertEqual(m["sections"]["life-licences"]["status"], "grey")
+
+    def test_template_cites_only_computed_metrics(self):
+        b = bundle()
+        b["report"] = "executive"
+        m = report.compute(b)  # no path stats: paths_red is never computed
+        cited = report.template(m)["sections"]["exec-availability"]["cite"]
+        self.assertNotIn("paths_red", cited)
+        self.assertTrue(all(c in m["metrics"] for s in report.template(m)["sections"].values() for c in s["cite"]))
+
+    def test_loss_floor_scales_with_the_window(self):
+        paths = {"t1": {"1.NE": {"alias": "busy", "overlayid": "1", "SUM_POST_LOSS": 1, "SUM_WRX_PKTS": 5000, "AVG_LATENCY_AVG": 5, "AVG_JITTER": 1, "mos": 440}}}
+        hour = bundle(health_threshold=THRESHOLDS, **{"paths:1.NE": paths})
+        hour["period"].update(from_ms=0, to_ms=3600000)
+        row = report.compute(hour)["sections"]["avail-paths"]["table"][0]
+        self.assertEqual((row["note"], row["loss_pct"]), ("", 0.02))  # 5,000 packets is plenty for an hour
+        month = bundle(health_threshold=THRESHOLDS, **{"paths:1.NE": paths})
+        month["period"].update(from_ms=0, to_ms=30 * 86400000)
+        self.assertEqual(report.compute(month)["sections"]["avail-paths"]["table"][0]["note"], "no traffic, probes lost")
+
+    def test_last_months_alarms_without_an_archive_are_not_zero(self):
+        b = bundle(appliance_alarms=[], period_alarms_covered=False)
+        m = report.compute(b)
+        self.assertEqual((m["metrics"]["alarms_critical"]["value"], m["sections"]["avail-alarms"]["status"]), (None, "grey"))
+        self.assertIn("alarm archive", " ".join(m["sections"]["data-gaps"]["notes"]))
+
+
+class ReviewRound3CollectTests(CollectTests):
+    def test_availability_reads_the_archive_for_older_alarms(self):
+        root = Path(self.tmp.name) / "history"
+        History(root, "lab").write("alarms", [{"id": 99, "applianceId": "1.NE", "severity": "CRITICAL", "timeOccurredInMills": 1788307200000}])  # 2026-09-02
+        History(root, "lab").add_coverage("alarms", [[1788220800000, 1790812799000]])
+        b = report.collect(self.server(RoutedClient(self.answers()), get_only=False), "lab", "availability", "2026-09", history_root=root,
+                           now=datetime(2026, 10, 23, tzinfo=timezone.utc))
+        m = report.compute(b)
+        self.assertTrue(b["data"]["period_alarms_covered"])
+        self.assertEqual(m["metrics"]["alarms_critical"]["value"], 1)  # the archived one, though the Orchestrator no longer has it
+
+    def test_unknown_nickname_and_incident_flags_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "unknown Orchestrator"):
+            report.collect(self.server(RoutedClient(self.answers()), get_only=False), "nope", "availability", "2026-09")
+        from unittest import mock
+        server = self.server(RoutedClient(self.answers()), get_only=False)
+        with mock.patch.object(report.Server, "from_dotenv", return_value=server), mock.patch("sys.stderr") as err:
+            self.assertEqual(report.main(["collect", "--orchestrator", "lab", "--report", "availability", "--alarm-id", "5"]), 1)
+            self.assertEqual(report.main(["collect", "--orchestrator", "lab", "--report", "incident", "--alarm-id", "5", "--from", "2026-10-01T00:00", "--to", "2026-10-01T01:00"]), 1)
+        self.assertIn("only for --report incident", "".join(str(c) for c in err.write.call_args_list))
 
 
 if __name__ == "__main__":
