@@ -10,8 +10,11 @@ from edgeconnect_mcp.config import Config
 from edgeconnect_mcp.server import Orchestrator, Server
 
 PATHS = ["/gms/versions", "/appliance", "/stats/config/availabilityThreshold", "/gms/stats/retention", "/stats/aggregate/availability/appliance",
-         "/stats/aggregate/availability/tunnel", "/health/alarmPeriodSummary", "/alarm/summary", "/gmsLicense", "/license/portal/summary"]
-SPEC = {"swagger": "2.0", "basePath": "/gms/rest", "paths": dict({p: {"get": {"summary": p}} for p in PATHS}, **{"/alarm/appliance": {"post": {"summary": "alarms"}}})}
+         "/stats/aggregate/availability/tunnel", "/health/alarmPeriodSummary", "/alarm/summary", "/gmsLicense", "/license/portal/summary",
+         "/alarm/count/appliance", "/gms/stats/nonStatsTable/retention", "/maintenanceMode", "/tunnels2/physical", "/tunnels2/bonded",
+         "/stats/timeseries/interfaceOverlay", "/stats/timeseries/interface", "/license/portal/appliance", "/appliance/backup"]
+POSTS = ["/alarm/appliance", "/health", "/stats/aggregate/interface"]
+SPEC = {"swagger": "2.0", "basePath": "/gms/rest", "paths": dict({p: {"get": {"summary": p}} for p in PATHS}, **{p: {"post": {"summary": p}} for p in POSTS})}
 APPLIANCES = [{"nePk": "1.NE", "hostName": "branch-a", "state": 1, "model": "EC-V", "softwareVersion": "9.6.2.1_1"},
               {"nePk": "2.NE", "hostName": "branch-b<script>", "state": 2, "model": "EC-XS", "softwareVersion": "9.7.1.0_1"}]
 
@@ -182,12 +185,13 @@ class CollectTests(unittest.TestCase):
 
     def test_read_post_runs_with_writes_off_and_times_use_the_right_units(self):
         client = RoutedClient(self.answers())
-        b = report.collect(self.server(client, get_only=False), "lab", "executive", "2026-09")
+        b = report.collect(self.server(client, get_only=False), "lab", "availability", "2026-09")
         posts = [c for c in client.calls if c[0] == "POST"]
         self.assertEqual(posts, [("POST", "/alarm/appliance", {"view": "all", "from": 1788220800000, "to": 1790812799000, "maxAlarms": 10000, "orderBySeverity": True}, {"nePks": ["1.NE", "2.NE"]})])
         reach = [c for c in client.calls if c[1] == "/stats/aggregate/availability/appliance"]
         self.assertEqual(reach[0][2], {"nePk": "1.NE", "date": "2026-09-01", "granularity": "month"})
         self.assertEqual({c["id"]: c["outcome"] for c in b["calls"] if c["id"].startswith("reach:")}, {"reach:1.NE": "ok", "reach:2.NE": "empty"})
+        b = report.collect(self.server(client, get_only=False), "lab", "lifecycle", "2026-09")
         self.assertNotIn("AAAA", json.dumps(b))  # licence keys and serials never reach a bundle
         self.assertNotIn("00-11", json.dumps(b))
         self.assertEqual(b["data"]["gms_license"], {"daysToExpiration": 400})
@@ -219,6 +223,122 @@ class CollectTests(unittest.TestCase):
         self.assertIn("<!doctype html>", (folder / "r.html").read_text())
         (folder / "narrative.json").write_text(json.dumps({"report": "availability", "sections": {"avail-summary": {"text": "7 sites"}}}))
         self.assertEqual(report.main(["validate", str(folder / "metrics.json"), str(folder / "narrative.json")]), 1)
+
+
+NOW = 1790000000  # 2026-09-21
+
+
+def phase2_bundle(report_name, **data):
+    b = bundle(**data)
+    b["report"] = report_name
+    b["period"]["now_s"] = NOW
+    return b
+
+
+class NocTests(unittest.TestCase):
+    def test_state_alarms_health_tunnels_and_worst_sites(self):
+        health = {"1.NE": [{"status": "HEALTHY", "time": NOW - 3600}, {"status": "CRITICAL", "time": NOW - 7200}, {"blank": True, "status": None, "time": NOW - 60},
+                           {"status": "WARNING", "time": NOW - 3 * 86400}],
+                  "2.NE": [{"status": "HEALTHY", "time": NOW - 3600}, {"status": "HEALTHY", "time": NOW - 5 * 86400}]}
+        tunnels = {"1.NE": {"t1": {"operStatus": "Up - Active", "alias": "a"}, "t2": {"operStatus": "Down", "alias": "b"}}, "2.NE": {"t3": {"operStatus": "Up - Idle", "alias": "c"}}}
+        alarms = [{"applianceId": "2.NE", "severity": "CRITICAL", "description": "Tunnel down", "timeOccurredInMills": (NOW - 60) * 1000}, {"applianceId": "1.NE", "severity": "MINOR"}]
+        m = report.compute(phase2_bundle("noc", health=health, tunnels_physical=tunnels, tunnels_bonded={}, active_alarms=alarms,
+                                         alarm_retention={"historical_appliance_alarm": {"retention": 604800}}))
+        v = {k: m["metrics"][k]["value"] for k in ("state_normal", "state_unreachable", "active_critical", "active_minor", "health_good_24h_pct", "health_good_7d_pct", "tunnels_physical_down", "tunnels_physical_total")}
+        self.assertEqual(v, {"state_normal": 1, "state_unreachable": 1, "active_critical": 1, "active_minor": 1, "health_good_24h_pct": 66.667, "health_good_7d_pct": 60.0,
+                             "tunnels_physical_down": 1, "tunnels_physical_total": 3})
+        s = {sid: sec["status"] for sid, sec in m["sections"].items()}
+        self.assertEqual((s["noc-appliances"], s["noc-alarms"], s["noc-health"], s["noc-tunnels"], s["noc-summary"]), ("red", "red", "red", "red", "red"))
+        self.assertIn("keeps 7 days of alarm history", " ".join(m["sections"]["noc-alarms"]["notes"]))
+        worst = m["sections"]["noc-worst"]["table"]
+        self.assertEqual([(r["appliance"], r["score"]) for r in worst], [("branch-b<script>", 110), ("branch-a", 3)])  # not normal + critical; tunnel down + unhealthy hour
+
+    def test_get_only_alarm_counts_and_no_health(self):
+        m = report.compute(phase2_bundle("noc", alarm_summary={"numOfCriticalAlarms": 0, "numOfMajorAlarms": 2, "numOfMinorAlarms": 1, "numOfWarningAlarms": 0},
+                                         alarm_counts=[{"applianceId": "1.NE", "numOfMajorAlarms": 2}]))
+        self.assertEqual((m["sections"]["noc-alarms"]["status"], m["metrics"]["active_major"]["value"]), ("amber", 2))
+        self.assertEqual(m["sections"]["noc-alarms"]["table"][0]["major"], 2)
+        self.assertEqual((m["sections"]["noc-health"]["status"], m["metrics"]["health_good_24h_pct"]["value"]), ("grey", None))
+        self.assertIn("POST /health did not run", " ".join(m["sections"]["data-gaps"]["notes"]))
+
+
+class CapacityTests(unittest.TestCase):
+    TOTALS = [{"nePk": "1.NE", "INTERFACE": "wan0", "TRAFFIC_TYPE": 4, "SUM_TX_BYTES": 1080000000000, "SUM_RX_BYTES": 0, "AVG_MAX_BW_TX": 100000, "AVG_MAX_BW_RX": 100000,
+               "MIN_TIMESTAMP": 0, "MAX_TIMESTAMP": 0},
+              {"nePk": "1.NE", "INTERFACE": "blan0", "TRAFFIC_TYPE": 4, "SUM_TX_BYTES": 9e12, "AVG_MAX_BW_TX": 1000},
+              {"nePk": "2.NE", "INTERFACE": "wan1.20", "TRAFFIC_TYPE": 4, "SUM_TX_BYTES": 0, "SUM_RX_BYTES": 0, "AVG_MAX_BW_TX": 50000, "AVG_MAX_BW_RX": 50000, "MIN_TIMESTAMP": 0, "MAX_TIMESTAMP": 0}]
+
+    def test_wan_links_average_utilisation_and_ranking(self):
+        links = report.wan_links({"interface_totals": self.TOTALS}, {"1.NE": "a", "2.NE": "b"})
+        self.assertEqual([(l["nePk"], l["interface"], l["avg_tx_pct"]) for l in links], [("1.NE", "wan0", 100.0), ("2.NE", "wan1.20", 0.0)])  # LAN ignored
+        overlay = [{"INTERFACE": "wan0", "ISWANSIDE": True, "TX_BYTES": 540000000, "RX_BYTES": 0, "MAX_BW_TX": 1000, "MAX_BW_RX": 1000, "LABELNAME": "INET"},
+                   {"INTERFACE": "wan0", "ISWANSIDE": True, "TX_BYTES": 540000000, "RX_BYTES": 0, "MAX_BW_TX": 1000, "MAX_BW_RX": 1000, "LABELNAME": "INET"},
+                   {"INTERFACE": "lan0", "ISWANSIDE": False, "TX_BYTES": 1e12}]
+        links = report.wan_links({"wan_side:1.NE": overlay}, ["1.NE"])
+        self.assertEqual([(l["interface"], l["label"], l["avg_tx_pct"]) for l in links], [("wan0", "INET", 10.0)])  # 1.08 GB over a day on 1 Mbps
+
+    def test_p95_of_hourly_utilisation_flags_links_at_80_percent(self):
+        hourly = [{"tx_bytes": 45000000000 * pct / 100, "rx_bytes": 0, "max_bw_tx": 100000, "max_bw_rx": 100000} for pct in range(1, 101)]  # 100 hours, 1..100%
+        m = report.compute(phase2_bundle("capacity", interface_totals=self.TOTALS, **{"hourly:1.NE:wan0": hourly}))
+        rows = {(r["appliance"], r["interface"]): r for r in m["sections"]["cap-links"]["table"]}
+        self.assertEqual((rows[("branch-a", "wan0")]["p95_out_pct"], rows[("branch-a", "wan0")]["status"]), (95.0, "red"))
+        self.assertEqual(rows[("branch-b<script>", "wan1.20")]["status"], "grey")  # no hourly data: not in the top N
+        self.assertEqual({k: m["metrics"][k]["value"] for k in ("links_flagged", "worst_p95_pct", "links_measured", "wan_links")},
+                         {"links_flagged": 1, "worst_p95_pct": 95.0, "links_measured": 1, "wan_links": 2})
+        self.assertEqual(report._p95([5.0]), 5.0)
+        self.assertIsNone(report._p95([]))
+
+
+class LifecycleTests(unittest.TestCase):
+    def test_advisory_versions(self):
+        advisory = {"fixed_in": {"9.6": "9.6.1", "9.5": "9.5.6", "9.4": "9.4.8"}}
+        cases = {"9.6.0.40000": "below 9.6.1", "9.6.1.1": None, "9.5.5_1": "below 9.5.6", "9.4.8.0": None, "9.3.7.0_96892": "no fix in the 9.3 train; upgrade",
+                 "9.7.1.42046": None, "10.0.0.40625": None, "": None}
+        self.assertEqual({v: report.advisory_hit(v, advisory) for v in cases}, cases)
+
+    def test_licences_backups_advisories_and_eol(self):
+        portal = {"data": [{"applianceId": "1.NE", "expirationDate": (NOW + 20 * 86400) * 1000}, {"applianceId": "2.NE", "expirationDate": (NOW + 60 * 86400) * 1000}]}
+        m = report.compute(phase2_bundle("lifecycle", versions={"current": "9.6.0.1"}, gms_license={"daysToExpiration": 400, "usedAppliances": 2}, portal_appliances=portal,
+                                         **{"backup:1.NE": [{"backupTime": NOW - 40 * 86400}, {"backupTime": NOW - 2 * 86400}], "backup:2.NE": []}))
+        v = {k: m["metrics"][k]["value"] for k in ("licences_expiring_30", "licences_expiring_90", "backups_stale", "advisory_hits", "ecos_trains")}
+        self.assertEqual(v, {"licences_expiring_30": 1, "licences_expiring_90": 2, "backups_stale": 1, "advisory_hits": 1, "ecos_trains": 2})
+        s = {sid: sec["status"] for sid, sec in m["sections"].items()}
+        self.assertEqual((s["life-licences"], s["life-backups"], s["life-advisories"], s["life-eol"], s["life-summary"]), ("red", "amber", "red", "grey", "red"))
+        self.assertEqual(m["sections"]["life-advisories"]["table"][0]["target"], "Orchestrator")
+        page = report.render(m)
+        self.assertIn("<title>Lifecycle, licence and vulnerability report, as of 2026-09-21", page)
+        self.assertIn("2 of 2 appliances returned data", page)
+        self.assertIn("as of", " ".join(m["sections"]["life-advisories"]["notes"]))
+
+
+class Phase2CollectTests(CollectTests):
+    def answers(self):
+        a = super().answers()
+        a.update({"/stats/aggregate/interface": CapacityTests.TOTALS, "/stats/timeseries/interfaceOverlay": {"1.NE": [{"INTERFACE": "wan0", "ISWANSIDE": True, "TX_BYTES": 1, "MAX_BW_TX": 10}]}})
+        return a
+
+    def test_capacity_get_only_finds_wan_links_from_overlay_stats_then_reads_hourly(self):
+        client = RoutedClient(self.answers())
+        report.collect(self.server(client, get_only=True), "lab", "capacity", "2026-09", now=datetime(2026, 9, 21, tzinfo=timezone.utc))
+        paths = [(c[0], c[1], (c[2] or {}).get("interfaceName"), (c[2] or {}).get("granularity")) for c in client.calls if c[1].startswith("/stats")]
+        self.assertEqual(paths, [("GET", "/stats/timeseries/interfaceOverlay", None, "day"), ("GET", "/stats/timeseries/interfaceOverlay", None, "day"),
+                                 ("GET", "/stats/timeseries/interface", "wan0", "hour")])
+        hourly = [c for c in client.calls if c[1] == "/stats/timeseries/interface"][0][2]
+        self.assertEqual(hourly["endTime"] - hourly["startTime"], 14 * 86400)  # hourly retention caps the P95 window
+
+    def test_capacity_uses_the_totals_post_and_the_top_n(self):
+        client = RoutedClient(self.answers())
+        report.collect(self.server(client, get_only=False), "lab", "capacity", "2026-09", top=1, now=datetime(2026, 9, 21, tzinfo=timezone.utc))
+        self.assertEqual([(c[0], c[1], (c[2] or {}).get("interfaceName")) for c in client.calls if c[1].startswith("/stats")],
+                         [("POST", "/stats/aggregate/interface", None), ("GET", "/stats/timeseries/interface", "wan0")])
+
+    def test_noc_and_lifecycle_requests(self):
+        client = RoutedClient(self.answers())
+        report.collect(self.server(client, get_only=False), "lab", "executive", "2026-09", now=datetime(2026, 9, 21, tzinfo=timezone.utc))
+        health = [c for c in client.calls if c[1] == "/health"][0]
+        self.assertEqual((health[3]["to"] - health[3]["from"], health[3]["nePks"]), (7 * 86400, ["1.NE", "2.NE"]))  # seconds
+        self.assertEqual([c[2]["runningConfig"] for c in client.calls if c[1] == "/appliance/backup"], ["false", "false"])
+        self.assertEqual([c[2] for c in client.calls if c[1] == "/tunnels2/bonded"], [{"operStatus": "true", "srcNePk": "true", "alias": "true", "tag": "true"}])
 
 
 if __name__ == "__main__":

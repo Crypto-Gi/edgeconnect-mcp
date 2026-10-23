@@ -158,7 +158,7 @@ The playbooks are for reference only. Every operation the skill names passed in 
 
 ## Report skill
 
-`skills/edgeconnect-report/` builds an `availability` (monthly service level) or `executive` (one-page summary) report. Code does the reading and the maths; the assistant only writes the prose, and a validator rejects prose that types a number or contradicts a computed status:
+`skills/edgeconnect-report/` builds five reports: `availability` (monthly service level), `noc` (what is broken now, last 24 hours and 7 days), `capacity` (WAN links by P95 utilisation), `lifecycle` (software, licences, backups and known security advisories) and `executive` (a one-page summary of all of them). Code does the reading and the maths; the assistant only writes the prose, and a validator rejects prose that types a number or contradicts a computed status:
 
 ```bash
 edgeconnect-mcp report collect --orchestrator lab --report availability --month 2026-09 --out rep
@@ -168,7 +168,7 @@ edgeconnect-mcp report validate rep/metrics.json rep/narrative.json
 edgeconnect-mcp report render rep/metrics.json rep/narrative.json --out rep/report.html
 ```
 
-`collect` uses the server's own code and `.env`, so the allowlist, redaction, audit log and `get_only` apply; on a GET-only Orchestrator it uses GET alternatives and lists what it could not fetch. The HTML is one file with inline CSS and SVG, no scripts, and prints on A4. The WAN capacity, NOC digest and lifecycle sections of the executive summary stay grey until those reports are built.
+`collect` uses the server's own code and `.env`, so the allowlist, redaction, audit log and `get_only` apply; on a GET-only Orchestrator it uses GET alternatives and lists what it could not fetch. The HTML is one file with inline CSS and SVG, no scripts, and prints on A4. Security advisories have no API, so they come from a dated list in `src/edgeconnect_mcp/advisories.py`, and the report says how old it is.
 
 ## Safety model
 
