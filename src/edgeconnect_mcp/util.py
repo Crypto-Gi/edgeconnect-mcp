@@ -9,7 +9,7 @@ from typing import Any, Mapping
 _SECRET_KEYS = re.compile(
     r"(?:api[-_]?key|authorization|cookie|csrf|password|passphrase|secret|token|psk|pre[-_]?shared|private[-_]?key|auth[-_]?key"
     r"|(?:ro|rw|trap[-_]?)community|account[-_]?key|^old[-_]?key$|(?:primary|secondary|privacy)[-_]?key|key[-_]?data|^key$"
-    r"|credentials?$|barcode)", re.I)
+    r"|credentials?$|barcode|licen[cs]e[-_]?key)", re.I)
 _SECRET_TEXT = re.compile(r"(?i)(authorization|x-auth-token|api[-_]?key|password|secret|cookie)\s*[:=]\s*([^\s,;]+)")
 
 

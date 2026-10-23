@@ -1,0 +1,1396 @@
+"""Orchestrator reports: collect -> compute -> (the agent writes narrative.json) -> validate -> render. Standard library only.
+
+collect  runs a fixed recipe of reads through the MCP server in-process (same .env, spec allowlist, redaction, audit log
+         and get_only rule) and writes bundle.json with every call's provenance.
+compute  turns the bundle into metrics.json: every number and every green/amber/red/grey status the report shows.
+template prints the narrative skeleton: section ids, computed status and the metric ids the prose may cite.
+validate checks narrative.json: numbers only as {{m:<metric id>}} tokens, known sections, no status that contradicts compute.
+render   writes one self-contained HTML5 file (inline CSS and SVG, no JavaScript).
+"""
+import argparse
+import calendar
+import hashlib
+import html
+import json
+import math
+import statistics
+import os
+import re
+import sys
+import time
+from datetime import date, datetime, timezone
+from pathlib import Path
+from string import Template
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from . import __version__
+from .advisories import ADVISORIES, AS_OF as ADVISORIES_AS_OF
+from .history import DEFAULT_ROOT as HISTORY_ROOT, History, missing as history_missing, pull, read_alarms
+from .errors import EdgeConnectError
+from .server import HOME_DOTENV, Server, ToolError
+
+STATUSES = ("green", "amber", "red", "grey")
+REPORTS = ("availability", "noc", "capacity", "lifecycle", "incident", "executive")
+SECTIONS = {
+    "availability": (("avail-summary", "Availability summary"), ("avail-appliances", "Appliance reachability"),
+                     ("avail-tunnels", "Tunnel availability"), ("avail-paths", "Path quality"), ("avail-alarms", "Alarms in the period"), ("data-gaps", "Data gaps")),
+    "noc": (("noc-summary", "NOC summary"), ("noc-appliances", "Appliance state"), ("noc-alarms", "Active alarms"), ("noc-health", "Health"),
+            ("noc-tunnels", "Tunnels down"), ("noc-worst", "Sites needing attention"), ("data-gaps", "Data gaps")),
+    "capacity": (("cap-summary", "WAN capacity summary"), ("cap-links", "WAN links by P95 utilisation"), ("data-gaps", "Data gaps")),
+    "lifecycle": (("life-summary", "Lifecycle summary"), ("life-inventory", "Inventory and software"), ("life-licences", "Licences"),
+                  ("life-backups", "Backups"), ("life-advisories", "Security advisories"), ("life-eol", "Hardware end of life"), ("data-gaps", "Data gaps")),
+    "executive": (("exec-fleet", "Fleet"), ("exec-availability", "Availability"), ("exec-alarms", "Active alarms"),
+                  ("exec-licensing", "Licensing"), ("exec-software", "Software versions"), ("exec-capacity", "WAN capacity"),
+                  ("exec-noc", "NOC digest"), ("exec-lifecycle", "Lifecycle and vulnerabilities"), ("data-gaps", "Data gaps")),
+    "incident": (("inc-summary", "Incident summary"), ("inc-timeline", "Alarm timeline"), ("inc-appliances", "Affected appliances"),
+                 ("inc-paths", "Path quality in the window"), ("inc-changes", "Changes in the window and the 24 hours before"), ("data-gaps", "Data gaps")),
+}
+ALWAYS_DOWN = 0.99  # a tunnel group up less than 1% of the period counts as down for the whole period: listed apart, not averaged in
+TITLES = {"availability": "Availability report", "noc": "NOC digest", "capacity": "WAN capacity report",
+          "lifecycle": "Lifecycle, licence and vulnerability report", "incident": "Major incident report",
+          "executive": "Executive summary"}
+INCIDENT_LOOKBACK_MS = 24 * 3600000  # changes in the 24 hours before an incident are shown next to it
+INCIDENT_MAX_APPLIANCES = 20
+INCIDENT_MAX_MS = 7 * 86400000  # longer windows are periods, not incidents (and the minute reachability is read per day)
+AUDIT_PAGE = 10000  # GET /action returns at most this many entries, newest first
+# The executive page's KPI strip: availability, overlays, sites below target, critical alarms, licence, capacity, NOC, advisories.
+EXEC_KPIS = ("fleet_reach_pct", "overlay_avail_pct", "appliances_below_target", "active_critical", "license_days_left", "worst_p95_pct",
+             "sites_needing_attention", "advisory_hits")
+PARTS = {"executive": ("availability", "noc", "capacity", "lifecycle")}  # reports that combine others; the rest are themselves
+STATE_NAMES = {1: "normal", 2: "unreachable", 3: "unsupported", 4: "out of sync", 5: "syncing"}  # GET /appliance `state`
+GOOD_HEALTH = ("HEALTHY",)  # POST /health hourly `status` that counts as good; the spec enum is HEALTHY, WARNING, MINOR, MAJOR, CRITICAL
+WAN_INTERFACE = re.compile(r"^b?wan\d", re.I)  # WAN ports and their VLANs (wan0, wan1.20, bwan0) in POST /stats/aggregate/interface
+HEALTH_VERTICALS = ["ALARM", "LOSS", "LATENCY", "JITTER", "MOS", "BW_UTILIZATION"]
+HOURLY_RETENTION = 14 * 86400  # fallback when GET /gms/stats/retention cannot be read: hourly interface stats kept 14 days by default
+# Report options: the only choices a user (or the agent asking them) can make; argparse enforces them and the report prints them.
+OPTIONS = {"period": ("last-month", "month-to-date"), "target": ("orchestrator", "99.5", "99.9", "99.99"), "down_tunnels": ("include", "separate")}
+DEFAULT_OPTIONS = {"period": "last-month", "scope": "all", "target": "orchestrator", "down_tunnels": "include"}
+MAX_ALARMS = 10000  # maxAlarms sent; a list this long may be cut, so it is reported as a gap
+# Loss % is lost / (received + lost) packets. Below this many received packets in the period a loss % means little (the loss
+# counters also count probe packets), so a tunnel that lost probes there is "no traffic, probes lost" and red. Seen on 10.0: idle
+# SSE and guest overlays with 0 packets received and thousands lost.
+MIN_LOSS_PACKETS = 10000
+# Used, and listed as a gap, when GET /health/healthThresholdConfig returns nothing (the values a 9.7.1 Orchestrator ships with;
+# capacity's 80/95 % link load is the report's own rule). goodLimit / okLimit as the Orchestrator names them.
+DEFAULT_HEALTH = {"packetLoss": (0.1, 1.0), "latency": (20.0, 50.0), "jitter": (10.0, 20.0), "mos": (1.0, 4.0), "bwUtilization": (80.0, 95.0)}
+DEFAULT_AVAILABILITY = (99.0, 99.5)  # used, and flagged, when GET /stats/config/availabilityThreshold returns nothing
+# Keys never copied into a bundle, whatever the server's redaction does.
+_DROP_KEYS = re.compile(r"licen[cs]e[-_]?key|serial|account[-_]?key|password|secret|token", re.I)  # serial: GET /appliance says plain `serial`
+_TOKEN = re.compile(r"\{\{m:([A-Za-z0-9_.\-]+)\}\}")
+_STATUS_WORDS = {"green": ("healthy", "on target", "meets target", "met target", "no issues"),
+                 "amber": ("degraded", "at risk", "needs attention"),
+                 "red": ("failing", "below target", "missed target", "outage"),  # not critical / warning: those name alarm severities
+                 "grey": ("no data", "not available", "unknown")}
+MAX_TEXT = 1200
+# Figures written as words are figures too.
+_NUMBER_WORDS = re.compile(r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+                           r"eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|thousands?|millions?|dozens?|half|halves|twice|doubled?|tripled?|"
+                           r"percent)\b", re.I)
+# Digits that are names, not figures: P95, the 24-hour and 7-day windows, software releases.
+_FIXED_TERMS = re.compile(r"\bP\d{2}\b|\blast (?:24 hours|7 days)\b|\b(?:ECOS|release|version|Orchestrator)\s+\d+(?:\.\d+)+\b", re.I)
+
+
+# --- collect -----------------------------------------------------------------
+
+class Collector:
+    def __init__(self, server: Any, orchestrator: str) -> None:
+        self.server, self.orchestrator = server, orchestrator.strip().lower()  # the server lowercases nicknames
+        self.calls: List[Dict[str, Any]] = []
+        self.data: Dict[str, Any] = {}
+        known = {o["name"]: o for o in self._tool("list_orchestrators", {})[1]}
+        if self.orchestrator not in known:
+            raise ValueError("unknown Orchestrator {!r}; configured: {}".format(orchestrator, ", ".join(known)))
+        self.read_posts = known[self.orchestrator]["read_posts_enabled"]
+
+    def _tool(self, name: str, arguments: Mapping[str, Any]) -> Tuple[bool, Any]:
+        response = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": dict(arguments, max_chars=10 ** 9)}})
+        text = response["result"]["content"][0]["text"]
+        if response["result"]["isError"]:
+            return False, text.split("\n", 1)[0][len("Error: "):] if text.startswith("Error: ") else text
+        value = json.loads(text)
+        return True, value.get("result") if isinstance(value, dict) and "result" in value else value
+
+    def call(self, cid: str, path: str, query: Optional[Dict[str, Any]] = None, body: Any = None, keep: bool = True) -> Any:
+        method = "GET" if body is None else "POST"
+        record: Dict[str, Any] = {"id": cid, "method": method, "path": path, "query": query or {}, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        if body is not None:
+            record["body"] = body
+        if method == "POST" and not self.read_posts:
+            record.update(outcome="skipped", error="read-only POSTs are off for this Orchestrator (get_only); GET alternatives used where one exists")
+            self.calls.append(record)
+            return None
+        started = time.monotonic()
+        arguments: Dict[str, Any] = {"orchestrator": self.orchestrator, "path": path, "query": query or {}}
+        ok, value = self._tool("api_get" if body is None else "api_read_post", dict(arguments, **({"body": body} if body is not None else {})))
+        record["seconds"] = round(time.monotonic() - started, 2)
+        if not ok:
+            status = re.search(r"HTTP (\d{3})", str(value))
+            record.update(outcome="error", error=str(value)[:300], http_status=int(status.group(1)) if status else None)
+            self.calls.append(record)
+            return None
+        value = _scrub(value)
+        record["outcome"] = "empty" if value in (None, [], {}, "") or value == {"data": []} else "ok"
+        self.calls.append(record)
+        if keep:
+            self.data[cid] = value
+        return value
+
+    def pager(self) -> Any:
+        """(path, query, body) -> rows, for history paging: recorded as calls, not kept as data (the pages go to the store)."""
+        return lambda path, query, body: self.call("history", path, query, body, keep=False)
+
+
+def _scrub(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _scrub(v) for k, v in value.items() if not _DROP_KEYS.search(str(k))}
+    if isinstance(value, list):
+        return [_scrub(v) for v in value]
+    return value
+
+
+def month_window(month: str, now: Optional[datetime] = None) -> Tuple[date, int, int]:
+    """First day, start and end (epoch ms) of YYYY-MM; the current month ends now."""
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise ValueError("--month must be YYYY-MM")
+    year, number = int(month[:4]), int(month[5:])
+    first = date(year, number, 1)
+    start = datetime(year, number, 1, tzinfo=timezone.utc)
+    end = datetime(year, number, calendar.monthrange(year, number)[1], 23, 59, 59, tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    if start > now:
+        raise ValueError("--month {} is in the future".format(month))
+    return first, int(start.timestamp() * 1000), int(min(end, now).timestamp() * 1000)
+
+
+def resolve_month(period: str, now: datetime) -> str:
+    """last-month is the previous calendar month; month-to-date is this one."""
+    if period not in OPTIONS["period"]:
+        raise ValueError("--period must be one of {}".format(", ".join(OPTIONS["period"])))
+    year, month = (now.year, now.month) if period == "month-to-date" else (now.year - (now.month == 1), now.month - 1 or 12)
+    return "{:04d}-{:02d}".format(year, month)
+
+
+def collect(server: Any, orchestrator: str, report: str, month: Optional[str] = None, appliances: Optional[List[str]] = None, top: int = 20,
+            now: Optional[datetime] = None, period: str = "last-month", target: str = "orchestrator", down_tunnels: str = "include",
+            window: Optional[Tuple[datetime, datetime]] = None, alarm_id: Optional[str] = None, history_root: Path = HISTORY_ROOT) -> Dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    if report == "incident" and not window and not alarm_id:
+        raise ValueError("the incident report needs --from and --to, or --alarm-id")
+    for name, value in (("target", target), ("down_tunnels", down_tunnels)):
+        if value not in OPTIONS[name]:
+            raise ValueError("{} must be one of {}".format(name, ", ".join(OPTIONS[name])))
+    options = {"period": "month" if month else period, "scope": "all", "target": target, "down_tunnels": down_tunnels}
+    month = month or resolve_month(period, now)
+    options["month"] = month
+    first, start_ms, end_ms = month_window(month, now)
+    c = Collector(server, orchestrator)
+    c.call("versions", "/gms/versions")
+    inventory = c.call("appliances", "/appliance") or []
+    if appliances:
+        known = {a.get("nePk") for a in inventory} | {a.get("hostName") for a in inventory}
+        unknown = [a for a in appliances if a not in known]
+        if unknown:
+            raise ValueError("--scope names appliances this Orchestrator does not have: {}".format(", ".join(unknown)))
+        inventory = [a for a in inventory if a.get("nePk") in appliances or a.get("hostName") in appliances]
+        c.data["appliances"] = inventory
+        options["scope"] = list(appliances)
+    nepks = [a["nePk"] for a in inventory if a.get("nePk")]
+    parts = PARTS.get(report, (report,))
+    if "availability" in parts:
+        _collect_availability(c, nepks, first, start_ms, end_ms, int(now.timestamp() * 1000), history_root)
+    if "noc" in parts:
+        _collect_noc(c, nepks, int(now.timestamp()))
+    if "capacity" in parts:
+        _collect_capacity(c, nepks, start_ms // 1000, end_ms // 1000, top, int(now.timestamp()))
+    if "lifecycle" in parts:
+        _collect_lifecycle(c, nepks)
+    now_ms = int(now.timestamp() * 1000)
+    c.data["read_posts"] = c.read_posts
+    if "incident" in parts:
+        start_ms, end_ms = _collect_incident(c, inventory, bool(appliances), window, alarm_id, now_ms, history_root)
+        options.update(period="incident", window=[start_ms, end_ms], alarm_id=alarm_id)
+    return {"kind": "edgeconnect-report-bundle", "generator": __version__, "report": report, "orchestrator": c.orchestrator, "options": options,
+            "period": {"month": month, "from_ms": start_ms, "to_ms": end_ms, "now_s": int(now.timestamp())},
+            "collected_at": now.isoformat(timespec="seconds"), "read_posts_enabled": c.read_posts, "calls": c.calls, "data": c.data,
+            "units": {"stats_time": "epoch seconds", "alarm_and_audit_time": "epoch milliseconds", "availability": "date YYYY-MM-DD; values are minute sample counts",
+                      "bandwidth": "kbps", "interface_bytes": "bytes per bucket"}}
+
+
+def _collect_availability(c: Collector, nepks: List[str], first: date, start_ms: int, end_ms: int, now_ms: int, root: Path) -> None:
+    c.call("availability_threshold", "/stats/config/availabilityThreshold")
+    c.call("health_threshold", "/health/healthThresholdConfig")
+    c.call("retention", "/gms/stats/retention")
+    for ne in nepks:
+        # Availability takes a date, alarms take epoch milliseconds (stats aggregates would take seconds).
+        c.call("reach:" + ne, "/stats/aggregate/availability/appliance", {"nePk": ne, "date": first.isoformat(), "granularity": "month"})
+        c.call("overlay:" + ne, "/stats/aggregate/availability/tunnel", {"nePk": ne, "date": first.isoformat(), "granularity": "month", "overlayId": "all"})
+        c.call("underlay:" + ne, "/stats/aggregate/availability/tunnel", {"nePk": ne, "date": first.isoformat(), "granularity": "month", "overlayId": "0"})
+        c.call("alarm_period:" + ne, "/health/alarmPeriodSummary", {"applianceId": ne, "from": start_ms, "to": end_ms})
+        # Path quality per tunnel over the period: aggregate stats take epoch seconds, daily buckets are kept for months.
+        c.call("paths:" + ne, "/stats/aggregate/tunnel", {"nePk": ne, "startTime": start_ms // 1000, "endTime": end_ms // 1000, "granularity": "day"})
+    if nepks:
+        c.call("appliance_alarms", "/alarm/appliance", {"view": "all", "from": start_ms, "to": end_ms, "maxAlarms": MAX_ALARMS, "orderBySeverity": True}, {"nePks": nepks})
+    # The Orchestrator keeps 7 days of alarms: anything older in the period comes from the archive (`report store`), or is a gap.
+    history = History(root, c.orchestrator)
+    older_until = min(end_ms, now_ms - 7 * 86400000)
+    listed = c.data.get("appliance_alarms")
+    archived = history_missing(history.coverage().get("alarms", []), start_ms, older_until) == []
+    # Only the alarm list can take archived alarms; the GET counts fallback cannot reach back past 7 days at all.
+    c.data["period_alarms_covered"] = start_ms >= older_until or (isinstance(listed, list) and archived)
+    if isinstance(listed, list):
+        c.data["appliance_alarms_capped"] = len(listed) >= MAX_ALARMS
+        c.data["appliance_alarms"] = _merge_by_id(listed, [a for a in history.load("alarms", start_ms, end_ms) if a.get("applianceId") in nepks])
+
+
+def _collect_noc(c: Collector, nepks: List[str], now_s: int) -> None:
+    c.call("alarm_summary", "/alarm/summary")
+    c.call("alarm_counts", "/alarm/count/appliance")
+    c.call("alarm_retention", "/gms/stats/nonStatsTable/retention")
+    c.call("maintenance", "/maintenanceMode")
+    # Network-wide in one call each; the boolean selectors keep only the fields named.
+    c.call("tunnels_physical", "/tunnels2/physical", {"operStatus": "true", "srcNePk": "true", "alias": "true"})
+    c.call("tunnels_bonded", "/tunnels2/bonded", {"operStatus": "true", "srcNePk": "true", "alias": "true", "tag": "true"})
+    if nepks:
+        c.call("active_alarms", "/alarm/appliance", {"view": "active", "maxAlarms": MAX_ALARMS, "orderBySeverity": True}, {"nePks": nepks})
+        c.call("health", "/health", {}, {"from": now_s - 7 * 86400, "to": now_s, "nePks": nepks, "overlayId": -1, "verticals": HEALTH_VERTICALS})
+
+
+def day_retention(retention: Any, kinds: Tuple[str, ...]) -> Optional[int]:
+    """Seconds of daily stats kept for the shortest of `kinds` (each kind's longer DAY entry), from GET /gms/stats/retention."""
+    kept = []
+    for kind in kinds:
+        entries = retention.get(kind) if isinstance(retention, dict) else None
+        days = [e.get("retention") for e in entries or [] if isinstance(e, dict) and str(e.get("granularity")).upper() == "DAY" and isinstance(e.get("retention"), (int, float))]
+        if days:
+            kept.append(int(max(days)))
+    return min(kept) if kept else None
+
+
+def hour_retention(retention: Any) -> Optional[int]:
+    """Seconds of hourly interface stats the Orchestrator keeps (the longer of the two HOUR entries GET /gms/stats/retention lists)."""
+    entries = retention.get("interface") if isinstance(retention, dict) else None
+    hours = [e.get("retention") for e in entries or [] if isinstance(e, dict) and str(e.get("granularity")).upper() == "HOUR" and isinstance(e.get("retention"), (int, float))]
+    return int(max(hours)) if hours else None
+
+
+def _collect_capacity(c: Collector, nepks: List[str], start_s: int, end_s: int, top: int, now_s: int) -> None:
+    if not nepks:
+        return
+    for cid, path in (("retention", "/gms/stats/retention"), ("health_threshold", "/health/healthThresholdConfig")):
+        if cid not in c.data:
+            c.call(cid, path)
+    kept = hour_retention(c.data.get("retention"))
+    # Hourly data reaches back from now, not from the period's end: a period past it gets daily buckets instead.
+    hourly_from = max(start_s, now_s - (kept or HOURLY_RETENTION))
+    basis = {"granularity": "hour", "from": hourly_from, "to": end_s} if hourly_from < end_s else {"granularity": "day", "from": start_s, "to": end_s}
+    c.data["capacity_basis"] = dict(basis, retention_known=kept is not None)
+    totals = c.call("interface_totals", "/stats/aggregate/interface", {"startTime": start_s, "endTime": end_s, "granularity": "day", "trafficType": "all_traffic"}, {"nePks": nepks})
+    if totals is None:  # GET-only, or the POST was refused: the overlay transport stats mark WAN-side interfaces (last day only)
+        for ne in nepks:
+            c.call("wan_side:" + ne, "/stats/timeseries/interfaceOverlay", {"nePk": ne, "startTime": end_s - 86400, "endTime": end_s, "granularity": "day"})
+    for link in wan_links(c.data, nepks)[:top]:  # busiest first, so the P95 reads go to the links most likely to be full
+        c.call("hourly:{}:{}".format(link["nePk"], link["interface"]), "/stats/timeseries/interface",
+               {"nePk": link["nePk"], "startTime": basis["from"], "endTime": basis["to"], "granularity": basis["granularity"], "trafficType": "all_traffic", "interfaceName": link["interface"]})
+
+
+def _merge_by_id(*lists: Any) -> List[Dict[str, Any]]:
+    """Records from several sources, one per id; the first source wins (live reads come first)."""
+    seen: Dict[str, Dict[str, Any]] = {}
+    for rows in lists:
+        for row in rows or []:
+            if isinstance(row, dict) and row.get("id") is not None:
+                seen.setdefault(str(row["id"]), row)
+    return list(seen.values())
+
+
+def _collect_incident(c: Collector, inventory: List[Dict[str, Any]], scoped: bool, window: Optional[Tuple[datetime, datetime]], alarm_id: Optional[str],
+                      now_ms: int, root: Path) -> Tuple[int, int]:
+    history = History(root, c.orchestrator)
+    nepks = [a["nePk"] for a in inventory if a.get("nePk")]
+    if scoped and len(nepks) > INCIDENT_MAX_APPLIANCES:
+        raise ValueError("--scope names {} appliances; an incident report takes at most {}".format(len(nepks), INCIDENT_MAX_APPLIANCES))
+    pager = c.pager()
+
+    def alarms(a: int, b: int) -> List[Dict[str, Any]]:
+        """Live alarms raised in [a, b] plus every alarm open now, then the archive for [a, b]; live reads win."""
+        rows, failed, notes, source = read_alarms(pager, nepks, c.read_posts, a, b)
+        c.data["incident_alarm_source"] = source
+        c.data.setdefault("incident_alarm_notes", []).extend(notes + (["alarms not read for {} windows".format(len(failed))] if failed else []))
+        return _merge_by_id(rows, history.load("alarms", a, b))
+
+    if window:
+        start_ms, end_ms = int(window[0].timestamp() * 1000), int(window[1].timestamp() * 1000)
+    else:  # the window around one alarm: an hour before it was raised to an hour after it cleared
+        found = [a for a in alarms(now_ms - 7 * 86400000, now_ms) + history.load("alarms", 0, now_ms) if str(a.get("id")) == str(alarm_id)]
+        if not found:
+            raise ValueError("alarm {} is not in the Orchestrator's 7 days of alarms or the stored history".format(alarm_id))
+        raised, cleared = found[0].get("timeOccurredInMills"), found[0].get("clearedTimeInMills")
+        if found[0].get("closed") and not cleared:
+            raise ValueError("alarm {} is closed but the Orchestrator gives no clear time (GET-only alarm list); give --from and --to".format(alarm_id))
+        start_ms = int(raised) - 3600000
+        end_ms = min(now_ms, int(cleared) + 3600000 if isinstance(cleared, (int, float)) and cleared > 0 else now_ms)
+    if not 0 < start_ms < end_ms <= now_ms + 60000:
+        raise ValueError("the incident window must start before it ends, and not in the future")
+    if end_ms - start_ms > INCIDENT_MAX_MS:
+        raise ValueError("an incident window is at most {} days; use the availability or NOC report for longer periods".format(INCIDENT_MAX_MS // 86400000))
+    before = start_ms - INCIDENT_LOOKBACK_MS
+    # Alarms raised up to 7 days before the window may still be open in it; older standing ones come from the open-now read.
+    raised_from = start_ms - 7 * 86400000
+    c.data["incident_alarms"] = alarms(raised_from, end_ms)
+    # Only the part of the window (and the 24 hours before it) older than the Orchestrator's own 7 days depends on the archive.
+    archive_until = min(end_ms, now_ms - 7 * 86400000)
+    c.data["incident_alarms_stored"] = before >= archive_until or history_missing(history.coverage().get("alarms", []), before, archive_until) == []
+    involved = [a.get("applianceId") for a in c.data["incident_alarms"] if start_ms <= (a.get("timeOccurredInMills") or 0) <= end_ms]
+    ranked = nepks if scoped else sorted(set(involved) & set(nepks), key=lambda ne: -involved.count(ne))
+    affected = ranked[:INCIDENT_MAX_APPLIANCES]
+    c.data["incident_dropped"] = len(ranked) - len(affected)
+    # Changes: the audit log is never stored, so one live page per scoped appliance (GET /action filters by appliance), or one
+    # page for everything. Pages come newest first: a full page reaches back only to its oldest entry, which is recorded.
+    audit, full_pages, read_ok = [], [], True
+    for ne in affected if scoped else [None]:
+        page = c.call("audit_page", "/action", dict({"startTime": before, "endTime": end_ms, "limit": AUDIT_PAGE}, **({"appliance": ne} if ne else {})), keep=False)
+        if not isinstance(page, list):
+            read_ok = False
+            continue
+        audit += page
+        if len(page) >= AUDIT_PAGE:
+            full_pages.append({"appliance": ne, "oldest": min((r.get("queuedTime") or 0) for r in page if isinstance(r, dict))})
+    keep = ("id", "queuedTime", "user", "name", "nepk", "completionStatus")  # what the report shows; results and helper details stay out
+    c.data["incident_audit"] = _merge_by_id([{k: r.get(k) for k in keep} for r in audit if isinstance(r, dict)])
+    c.data["incident_audit_full"] = full_pages
+    c.data["incident_audit_ok"] = read_ok
+    c.call("health_threshold", "/health/healthThresholdConfig")
+    c.call("availability_threshold", "/stats/config/availabilityThreshold")
+    # Path stats: minute buckets are kept about a day, hourly about 14 days, daily for months (GET /gms/stats/retention).
+    granularity = "minute" if start_ms >= now_ms - 86400000 else "hour" if start_ms >= now_ms - 14 * 86400000 else "day"
+    days = sorted({datetime.fromtimestamp(t / 1000, timezone.utc).date().isoformat() for t in range(start_ms, end_ms + 1, 86400000)} |
+                  {datetime.fromtimestamp(end_ms / 1000, timezone.utc).date().isoformat()})
+    for ne in affected:
+        for day in days:
+            c.call("reach_minutes:{}:{}".format(ne, day), "/stats/timeseries/availability/appliance", {"nePk": ne, "date": day, "granularity": "day"})
+        c.call("paths:" + ne, "/stats/aggregate/tunnel", {"nePk": ne, "startTime": start_ms // 1000, "endTime": end_ms // 1000, "granularity": granularity})
+    c.data["incident"] = {"from_ms": start_ms, "to_ms": end_ms, "affected": affected, "granularity": granularity, "alarm_id": alarm_id}
+    return start_ms, end_ms
+
+
+def _collect_lifecycle(c: Collector, nepks: List[str]) -> None:
+    c.call("gms_license", "/gmsLicense")
+    c.call("portal_appliances", "/license/portal/appliance")
+    for ne in nepks:
+        c.call("backup:" + ne, "/appliance/backup", {"nePk": ne, "runningConfig": "false"})  # without it each backup carries its whole config
+
+
+# --- compute -----------------------------------------------------------------
+
+def band(value: Optional[float], limits: Tuple[float, float], higher_is_better: bool = True) -> str:
+    """green / amber / red against two limits; grey when there is no value. Limit order does not matter."""
+    if value is None:
+        return "grey"
+    low, high = sorted(limits)
+    if higher_is_better:
+        return "green" if value >= high else "amber" if value >= low else "red"
+    return "green" if value <= low else "amber" if value <= high else "red"
+
+
+def worst(statuses: List[str]) -> str:
+    known = [s for s in statuses if s != "grey"]
+    return max(known, key=("green", "amber", "red").index) if known else "grey"
+
+
+def _target_limits(ctx: Dict[str, Any], key: str) -> Tuple[float, float]:
+    """Availability limits: a fixed --target is met (green) or missed (red); `orchestrator` uses its configured thresholds."""
+    target = ctx["options"].get("target", "orchestrator")
+    if target != "orchestrator":
+        return float(target), float(target)
+    limits, default_used = _limits(ctx["data"].get("availability_threshold") or {}, key)
+    note = "No availability thresholds configured; default {} / {} % used.".format(*DEFAULT_AVAILABILITY)
+    if default_used and note not in ctx["gaps"]:
+        ctx["gaps"].append(note)
+    return limits
+
+
+def _limits(threshold: Any, key: str) -> Tuple[Tuple[float, float], bool]:
+    item = threshold.get(key) if isinstance(threshold, dict) else None
+    if isinstance(item, dict) and isinstance(item.get("goodLimit"), (int, float)) and isinstance(item.get("okLimit"), (int, float)):
+        return (float(item["goodLimit"]), float(item["okLimit"])), False
+    return DEFAULT_AVAILABILITY, True
+
+
+def _pct(part: float, whole: float) -> Optional[float]:
+    return round(100.0 * part / whole, 3) if whole else None
+
+
+def _tunnel_totals(value: Any, separate: bool = False) -> Dict[str, Any]:
+    """Seconds sampled, down and degraded, plus the groups down for the whole period (up under 1% of it), which `separate` leaves out of the totals.
+
+    `count` is minute samples while tunnel_state, blackout and brownout are seconds (seen on 9.7.1 and 10.0: count 1441 for a
+    day, downtime up to count x 60); tunnel_state and blackout overlap, so take the larger."""
+    totals: Dict[str, Any] = {"seconds": 0.0, "down": 0.0, "brownout": 0.0, "always_down": []}
+    groups = value.values() if isinstance(value, dict) else [value] if isinstance(value, list) else []
+    for group in groups:
+        for row in group if isinstance(group, list) else []:
+            if isinstance(row, dict):
+                seconds = 60.0 * float(row.get("count") or 0)
+                down = min(seconds, max(float(row.get("tunnel_state") or 0), float(row.get("blackout") or 0)))
+                if seconds and down >= ALWAYS_DOWN * seconds:
+                    totals["always_down"].append(row)
+                    if separate:
+                        continue
+                totals["seconds"] += seconds
+                totals["down"] += down
+                totals["brownout"] += min(seconds, float(row.get("brownout") or 0))
+    return totals
+
+
+def _p95(values: List[float]) -> Optional[float]:
+    """Nearest-rank 95th percentile."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return round(ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)], 2)
+
+
+def _version(text: Any) -> Tuple[int, ...]:
+    """9.6.2.1_107093 -> (9, 6, 2, 1); 9.7.1.42046 -> (9, 7, 1, 42046)."""
+    match = re.match(r"\d+(?:\.\d+)*", str(text or ""))
+    return tuple(int(part) for part in match.group(0).split(".")) if match else ()
+
+
+def advisory_hit(version: Any, advisory: Mapping[str, Any]) -> Optional[str]:
+    """Why `version` is affected by `advisory`, or None. Trains newer than every listed one are not affected."""
+    v = _version(version)
+    if len(v) < 2:
+        return None
+    fixed = {_version(train): _version(build) for train, build in advisory["fixed_in"].items()}
+    train = v[:2]
+    if train in fixed:
+        return "below {}".format(".".join(map(str, fixed[train]))) if v < fixed[train] else None
+    return "no fix in the {} train; upgrade".format(".".join(map(str, train))) if train < min(fixed) else None
+
+
+def wan_links(data: Mapping[str, Any], nepks: Any) -> List[Dict[str, Any]]:
+    """WAN interfaces with their average utilisation over the window, busiest first.
+
+    From POST /stats/aggregate/interface when it ran (one row per interface; BW in kbps; daily buckets), else from the
+    WAN-side rows of GET /stats/timeseries/interfaceOverlay for the last day (summed over overlays)."""
+    links: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    rows = data.get("interface_totals")
+    if isinstance(rows, list):
+        for row in rows:
+            name = str(row.get("INTERFACE") or "")
+            if row.get("nePk") in nepks and WAN_INTERFACE.match(name) and row.get("TRAFFIC_TYPE") in (4, None):
+                seconds = float(row.get("MAX_TIMESTAMP") or 0) - float(row.get("MIN_TIMESTAMP") or 0) + 86400
+                links[(row["nePk"], name)] = {"nePk": row["nePk"], "interface": name, "label": "", "tx_bytes": float(row.get("SUM_TX_BYTES") or 0),
+                                              "rx_bytes": float(row.get("SUM_RX_BYTES") or 0), "bw_tx": float(row.get("AVG_MAX_BW_TX") or 0),
+                                              "bw_rx": float(row.get("AVG_MAX_BW_RX") or 0), "seconds": seconds, "source": "POST /stats/aggregate/interface"}
+    else:
+        for ne in nepks:
+            for row in data.get("wan_side:" + str(ne)) or []:
+                if not isinstance(row, dict) or not row.get("ISWANSIDE"):
+                    continue
+                link = links.setdefault((ne, str(row.get("INTERFACE"))), {"nePk": ne, "interface": str(row.get("INTERFACE")), "label": str(row.get("LABELNAME") or ""),
+                                                                         "tx_bytes": 0.0, "rx_bytes": 0.0, "bw_tx": 0.0, "bw_rx": 0.0, "seconds": 86400.0,
+                                                                         "source": "GET /stats/timeseries/interfaceOverlay (last day)"})
+                link["tx_bytes"] += float(row.get("TX_BYTES") or 0)
+                link["rx_bytes"] += float(row.get("RX_BYTES") or 0)
+                link["bw_tx"] = max(link["bw_tx"], float(row.get("MAX_BW_TX") or 0))
+                link["bw_rx"] = max(link["bw_rx"], float(row.get("MAX_BW_RX") or 0))
+    for link in links.values():
+        link["avg_tx_pct"] = _util(link["tx_bytes"], link["seconds"], link["bw_tx"])
+        link["avg_rx_pct"] = _util(link["rx_bytes"], link["seconds"], link["bw_rx"])
+    return sorted(links.values(), key=lambda link: -max(link["avg_tx_pct"] or 0, link["avg_rx_pct"] or 0))
+
+
+def _expiry_status(days: int) -> str:
+    """Licences: 30 days or less red, 90 days or less amber."""
+    return "red" if days <= 30 else "amber" if days <= 90 else "green"
+
+
+def _load_status(pct: Optional[float], limits: Tuple[float, float] = DEFAULT_HEALTH["bwUtilization"]) -> str:
+    """Link load: at or above the lower limit amber, at or above the higher red."""
+    low, high = sorted(limits)
+    return "grey" if pct is None else "red" if pct >= high else "amber" if pct >= low else "green"
+
+
+def health_limits(data: Mapping[str, Any], key: str, gaps: List[str]) -> Tuple[float, float]:
+    """goodLimit / okLimit for one metric from GET /health/healthThresholdConfig, else the default (listed as a gap once)."""
+    item = (data.get("health_threshold") or {}).get(key) if isinstance(data.get("health_threshold"), dict) else None
+    if isinstance(item, dict) and isinstance(item.get("goodLimit"), (int, float)) and isinstance(item.get("okLimit"), (int, float)):
+        return float(item["goodLimit"]), float(item["okLimit"])
+    note = "No {} limits from GET /health/healthThresholdConfig; default {} / {} used.".format(key, *DEFAULT_HEALTH[key])
+    if note not in gaps:
+        gaps.append(note)
+    return DEFAULT_HEALTH[key]
+
+
+def _util(byte_count: float, seconds: float, kbps: float) -> Optional[float]:
+    """Percent of the configured bandwidth: bytes x 8 / (seconds x kbps x 1000)."""
+    return round(100.0 * byte_count * 8 / (seconds * kbps * 1000), 2) if seconds > 0 and kbps > 0 else None
+
+
+def compute(bundle: Mapping[str, Any]) -> Dict[str, Any]:
+    data, calls, report = bundle["data"], bundle["calls"], bundle["report"]
+    metrics: Dict[str, Dict[str, Any]] = {}
+    sections: Dict[str, Dict[str, Any]] = {}
+    gaps: List[str] = []
+
+    def metric(mid: str, value: Any, unit: str, label: str, status: Optional[str] = None) -> str:
+        metrics[mid] = {"value": value, "unit": unit, "label": label, "status": status}
+        return mid
+
+    # Skipped (get_only) and refused (401/403) calls say nothing about the statistics store.
+    stats_calls = [c for c in calls if c["path"].startswith("/stats/") and c.get("outcome") != "skipped" and c.get("http_status") not in (401, 403)]
+    stats_down = bool(stats_calls) and all(c.get("outcome") == "error" and c.get("http_status") == 500 for c in stats_calls)
+    for c in calls:
+        if c.get("outcome") in ("error", "skipped") and not (stats_down and c["path"].startswith("/stats/")):
+            gaps.append("{} {}: {}".format(c["method"], c["path"], c.get("error") or c["outcome"]))
+    if stats_down:
+        gaps.insert(0, "Every statistics call returned HTTP 500: the Orchestrator's statistics store is down, so statistics are not shown.")
+
+    inventory = data.get("appliances") or []
+    names = {a.get("nePk"): a.get("hostName") or a.get("nePk") for a in inventory}
+    now_s = int(bundle["period"].get("now_s") or bundle["period"]["to_ms"] // 1000)
+    parts = PARTS.get(report, (report,))
+    options = dict(DEFAULT_OPTIONS, month=bundle["period"]["month"])
+    options.update(bundle.get("options") or {})
+    ctx = {"data": data, "inventory": inventory, "names": names, "metric": metric, "metrics": metrics, "gaps": gaps, "stats_down": stats_down, "now_s": now_s, "options": options,
+           "period_s": max(1, (bundle["period"]["to_ms"] - bundle["period"]["from_ms"]) // 1000)}
+    m_total = metric("appliances_total", len(inventory), "appliances", "Appliances in scope")
+    if "availability" in parts:
+        sections.update(_availability(ctx))
+    if "noc" in parts:
+        sections.update(_noc(ctx))
+    if "capacity" in parts:
+        sections.update(_capacity(ctx))
+    if "lifecycle" in parts:
+        sections.update(_lifecycle(ctx))
+    if "incident" in parts:
+        sections.update(_incident(ctx))
+
+    if report == "executive":
+        reachable_now = [a for a in inventory if a.get("state") == 1]
+        down_share = _pct(len(inventory) - len(reachable_now), len(inventory))
+        fleet_status = "grey" if down_share is None else "green" if not down_share else "red" if down_share > 10 else "amber"
+        m_now = metric("reachable_now_pct", _pct(len(reachable_now), len(inventory)), "%", "Appliances reachable at collection time", fleet_status)
+        metric("reachable_now", len(reachable_now), "appliances", "Appliances reachable at collection time")
+        sections["exec-fleet"] = {"status": fleet_status, "metrics": [m_total, "reachable_now", m_now],
+                                  "notes": ["Rule: any appliance down is amber; more than 10% down is red. The appliance list is in the availability and NOC reports."]}
+        sections["exec-availability"] = {"status": worst([sections[sid]["status"] for sid in ("avail-appliances", "avail-tunnels", "avail-paths")]),
+                                         "metrics": ["fleet_reach_pct", "overlay_avail_pct", "underlay_avail_pct", "appliances_below_target", "paths_red"]}
+        sections["exec-alarms"] = dict(sections["noc-alarms"], table=[])
+        sections["exec-licensing"] = dict(sections["life-licences"], table=[])
+        sections["exec-software"] = {"status": metrics["ecos_trains"]["status"], "metrics": ["ecos_versions", "ecos_trains", "orchestrator_version"],
+                                     "notes": ["Rule: more than one ECOS train in use is amber."]}
+        sections["exec-capacity"] = {"status": sections["cap-summary"]["status"], "metrics": sections["cap-summary"]["metrics"]}
+        sections["exec-noc"] = {"status": sections["noc-summary"]["status"], "metrics": sections["noc-summary"]["metrics"]}
+        sections["exec-lifecycle"] = {"status": sections["life-summary"]["status"], "metrics": sections["life-summary"]["metrics"]}
+    kept = day_retention(data.get("retention"), ("tunnel", "interface"))
+    if kept and bundle["period"]["from_ms"] // 1000 < now_s - kept and report in ("availability", "capacity", "executive"):
+        gaps.append("The period starts older than the {:g} days of daily statistics this Orchestrator keeps, so path quality and capacity cover only part of it, or none.".format(kept / 86400))
+    sections["data-gaps"] = {"status": "grey" if gaps else "green", "metrics": [], "notes": gaps or ["None: every call returned data."]}
+    headline = None
+    if report == "executive":
+        areas = [sid for sid, _ in SECTIONS[report] if sid != "data-gaps"]
+        overall = worst([sections[sid]["status"] for sid in areas])
+        attention = [dict(SECTIONS[report])[sid] for sid in areas if sections[sid]["status"] in ("amber", "red")]
+        headline = {"status": overall, "kpis": [k for k in EXEC_KPIS if k in metrics],
+                    "text": "Overall: {}. {}.".format(overall.title(), "No area needs attention" if not attention else "Attention needed in " + ", ".join(attention))}
+
+    # An appliance counts as covered when any per-appliance read returned something for it (keyed "<what>:<nePk>", or named inside a result).
+    other = json.dumps({k: v for k, v in data.items() if k not in ("appliances", "versions") and ":" not in k})
+    answered = sum(1 for ne in names if any(k.endswith(":" + str(ne)) and v for k, v in data.items()) or '"{}"'.format(ne) in other)
+    return {"kind": "edgeconnect-report-metrics", "report": report, "orchestrator": bundle["orchestrator"],
+            "orchestrator_version": (data.get("versions") or {}).get("current") if isinstance(data.get("versions"), dict) else None,
+            "period": bundle["period"], "collected_at": bundle["collected_at"], "bundle_sha256": bundle.get("sha256"),
+            "coverage": {"appliances": len(names), "with_data": answered}, "stats_store_down": stats_down,
+            "options": dict(options, down_tunnels_count=metrics.get("tunnel_groups_down_all_period", {}).get("value"),
+                            idle_paths_count=metrics.get("paths_idle_probe_loss", {}).get("value")),
+            "headline": headline, "metrics": metrics, "sections": {sid: sections[sid] for sid, _ in SECTIONS[report]}}
+
+
+def _availability(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    data, inventory, names, metric, metrics, gaps = ctx["data"], ctx["inventory"], ctx["names"], ctx["metric"], ctx["metrics"], ctx["gaps"]
+    sections: Dict[str, Dict[str, Any]] = {}
+    threshold = data.get("availability_threshold") or {}
+    # Appliance reachability: minute samples, so % = reachable minutes / sample count.
+    limits = _target_limits(ctx, "reachability")
+    rows, total_reach, total_samples = [], 0.0, 0.0
+    for ne, name in names.items():
+        sample = (data.get("reach:" + str(ne)) or [{}])[0] if isinstance(data.get("reach:" + str(ne)), list) else {}
+        samples, reach = float(sample.get("samplecount") or 0), float(sample.get("appliancereachability") or 0)
+        pct = _pct(reach, samples)
+        if pct is None and not ctx["stats_down"]:
+            state = next((a.get("state") for a in inventory if a.get("nePk") == ne), None)
+            gaps.append("{}: no reachability samples for the month{}.".format(name, " although it is reachable now (check ECOS 9.3.4/9.4.2/9.5.0 or later, and retention)" if state == 1 else ""))
+        total_reach, total_samples = total_reach + reach, total_samples + samples
+        rows.append({"appliance": name, "nePk": ne, "value": pct, "status": band(pct, limits)})
+    fleet = _pct(total_reach, total_samples)
+    m_fleet = metric("fleet_reach_pct", fleet, "%", "Fleet appliance reachability", band(fleet, limits))
+    below = [r for r in rows if r["status"] in ("amber", "red")]
+    m_below = metric("appliances_below_target", len(below) if fleet is not None else None, "appliances", "Appliances below the reachability target")
+    m_measured = metric("appliances_measured", sum(1 for r in rows if r["value"] is not None), "appliances", "Appliances with reachability data")
+    metric("reach_target_pct", max(limits), "%", "Reachability target")
+    rows.sort(key=lambda r: (r["value"] is None, r["value"] if r["value"] is not None else 0))
+    sections["avail-appliances"] = {"status": metrics[m_fleet]["status"], "metrics": [m_fleet, m_below, m_measured, "reach_target_pct"],
+                                    "table": rows, "chart": {"title": "Lowest appliance reachability, % of the month", "zoom": True,
+                                                             "points": [(r["appliance"], r["value"], r["status"]) for r in rows if r["value"] is not None][:25]}}
+
+    # Tunnel availability, derived: 1 - down seconds / sampled seconds; brownout is shown as a degraded share.
+    tunnel_metrics, tunnel_rows, tunnel_status, always_down = [], [], [], []
+    separate = ctx["options"].get("down_tunnels") == "separate"
+    for kind, key, label in (("overlay", "overlayAvailability", "Overlay"), ("underlay", "underlayAvailability", "Underlay")):
+        lim = _target_limits(ctx, key)
+        totals = {"seconds": 0.0, "down": 0.0, "brownout": 0.0}
+        for ne, name in names.items():
+            t = _tunnel_totals(data.get("{}:{}".format(kind, ne)), separate)
+            for k in totals:
+                totals[k] += t[k]
+            for row in t["always_down"]:
+                always_down.append({"appliance": name, "kind": label, "label": row.get("label"), "service": row.get("serviceName"), "tunnels": row.get("tunnelcount")})
+            if t["seconds"]:
+                pct = _pct(t["seconds"] - t["down"], t["seconds"])
+                tunnel_rows.append({"appliance": name, "kind": label, "value": pct, "degraded_pct": _pct(t["brownout"], t["seconds"]), "status": band(pct, lim)})
+        pct = _pct(totals["seconds"] - totals["down"], totals["seconds"])
+        tunnel_status.append(band(pct, lim))
+        tunnel_metrics += [metric(kind + "_avail_pct", pct, "%", label + " tunnel availability (derived)", band(pct, lim)),
+                           metric(kind + "_degraded_pct", _pct(totals["brownout"], totals["seconds"]), "%", label + " brownout share")]
+    tunnel_rows.sort(key=lambda r: (r["value"] is None, r["value"] or 0))
+    notes = ["Derived from the Orchestrator's tunnel availability data as 1 - downtime / time sampled (samples are minutes, downtime is seconds); brownout is reported separately."]
+    if len(tunnel_rows) > 25:
+        notes.append("Worst 25 shown; {} more rows not shown.".format(len(tunnel_rows) - 25))
+    tunnel_metrics.append(metric("tunnel_groups_down_all_period", sum(int(r["tunnels"] or 1) for r in always_down), "tunnels",
+                                 "Tunnels down for the whole period ({})".format("left out of the figures" if separate else "included in the figures")))
+    if always_down:
+        notes.append("Down for the whole period (up less than 1% of it), {}; often unused or decommissioned paths: ".format(
+                     "so left out of the figures above (option: down tunnels separate)" if separate else "and counted in the figures above (option: down tunnels include)")
+                     + "; ".join(" ".join([r["appliance"], r["kind"].lower()] + [str(x) for x in (r["label"], r["service"]) if x and x not in ("none", "unassigned")]
+                                          + ["({} tunnel{})".format(r["tunnels"], "" if r["tunnels"] == 1 else "s")]) for r in always_down[:25])
+                     + ("; and {} more".format(len(always_down) - 25) if len(always_down) > 25 else "") + ".")
+    sections["avail-tunnels"] = {"status": worst(tunnel_status), "metrics": tunnel_metrics, "table": tunnel_rows[:25], "notes": notes}
+
+    # Alarms raised in the period: the full list if the read POST ran, otherwise per-appliance counts (GET).
+    counts = {"CRITICAL": 0, "MAJOR": 0, "MINOR": 0, "WARNING": 0}
+    alarm_rows: List[Dict[str, Any]] = []
+    listed = data.get("appliance_alarms")
+    covered = data.get("period_alarms_covered", True)
+    if not covered:
+        gaps.append("Alarms in the period: the Orchestrator keeps 7 days of alarms and the alarm archive (`report store`) does not cover the rest of the period, "
+                    "so the counts are not shown.")
+    if isinstance(listed, list) and data.get("appliance_alarms_capped", len(listed) >= MAX_ALARMS):
+        gaps.append("Alarms in the period: the list reached the {}-alarm cap, so the counts may be low.".format(MAX_ALARMS))
+    if isinstance(listed, list):
+        for alarm in listed:
+            sev = str(alarm.get("severity") or "").upper()
+            if sev in counts:
+                counts[sev] += 1
+            if sev in ("CRITICAL", "MAJOR") and len(alarm_rows) < 15:
+                alarm_rows.append({"appliance": names.get(alarm.get("applianceId"), alarm.get("applianceId")), "severity": sev.lower(), "description": str(alarm.get("description") or "")[:160]})
+        source = "POST /alarm/appliance"
+    else:
+        for ne in names:
+            period = data.get("alarm_period:" + str(ne)) or {}
+            for sev, n in ((period.get("alarmCountsInPeriod") or {}) if isinstance(period, dict) else {}).items():
+                if str(sev).upper() in counts and isinstance(n, int):
+                    counts[str(sev).upper()] += n
+        source = "GET /health/alarmPeriodSummary per appliance"
+    have_alarms = covered and (isinstance(listed, list) or any(("alarm_period:" + str(ne)) in data for ne in names))
+    alarm_status = "grey" if not have_alarms else "red" if counts["CRITICAL"] else "amber" if counts["MAJOR"] else "green"
+    alarm_ids = [metric("alarms_" + sev.lower(), counts[sev] if have_alarms else None, "alarms", sev.title() + " alarms in the period") for sev in counts]
+    sections["avail-alarms"] = {"status": alarm_status, "metrics": alarm_ids, "table": alarm_rows, "notes": ["Source: " + source + "."]}
+
+    sections["avail-paths"] = _paths(ctx)
+    availability_status = worst([sections["avail-appliances"]["status"], sections["avail-tunnels"]["status"], sections["avail-paths"]["status"]])
+    sections["avail-summary"] = {"status": availability_status, "metrics": [m_fleet, "overlay_avail_pct", "underlay_avail_pct", "alarms_critical", "appliances_total"]}
+    return sections
+
+
+def _paths(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Loss (after FEC), latency, jitter and MOS per tunnel over the period, graded against GET /health/healthThresholdConfig.
+
+    Three kinds of tunnel: carrying traffic (loss % = lost / (received + lost)); near-idle but losing probes, which is a broken
+    path and is red, counted or listed apart as --down-tunnels says; and no packets and no probe loss at all (loss: no data)."""
+    data, names, metric, gaps = ctx["data"], ctx["names"], ctx["metric"], ctx["gaps"]
+    separate = ctx["options"].get("down_tunnels") == "separate"
+    # The floor is set for a month; a shorter window (an incident hour) gets a proportionally lower one, at least 100 packets.
+    floor = max(100, int(MIN_LOSS_PACKETS * ctx.get("period_s", 30 * 86400) / (30 * 86400)))
+    rows, broken = [], []
+    for ne, name in names.items():
+        value = data.get("paths:" + str(ne))
+        for tunnel_id, per_ne in (value.items() if isinstance(value, dict) else []):
+            stats = per_ne.get(ne) if isinstance(per_ne, dict) else None
+            if not isinstance(stats, dict):
+                continue
+            received, lost = float(stats.get("SUM_WRX_PKTS") or 0), float(stats.get("SUM_POST_LOSS") or 0)
+            row = {"appliance": name, "tunnel": stats.get("alias") or tunnel_id, "kind": "underlay" if str(stats.get("overlayid")) == "0" else "overlay",
+                   "loss_pct": round(100.0 * lost / (received + lost), 3) if received >= floor or (received and not lost) else None,
+                   "latency_ms": float(stats["AVG_LATENCY_AVG"]) if isinstance(stats.get("AVG_LATENCY_AVG"), (int, float)) else None,
+                   "jitter_ms": float(stats["AVG_JITTER"]) if isinstance(stats.get("AVG_JITTER"), (int, float)) else None,
+                   "mos": round(stats["mos"] / 100.0, 2) if isinstance(stats.get("mos"), (int, float)) and stats["mos"] > 0 else None,  # tunnel aggregate MOS is x100
+                   "note": ""}
+            if received < floor and lost:
+                row["note"] = "no traffic, probes lost"
+                if separate:
+                    broken.append(row)
+                    continue
+            rows.append(row)
+    if not rows and not broken:
+        return {"status": "grey", "metrics": [metric("paths_measured", 0, "tunnels", "Tunnels with path statistics")], "notes": ["No tunnel statistics for the period."]}
+    limits = {key: health_limits(data, key, gaps) for key in ("packetLoss", "latency", "jitter", "mos")}
+    for row in rows + broken:
+        row["status"] = "red" if row["note"] else worst([band(row["loss_pct"], limits["packetLoss"], higher_is_better=False), band(row["latency_ms"], limits["latency"], higher_is_better=False),
+                                                          band(row["jitter_ms"], limits["jitter"], higher_is_better=False), band(row["mos"], limits["mos"])])
+    rows.sort(key=lambda r: (-("grey", "green", "amber", "red").index(r["status"]), -(r["loss_pct"] or 0), -(r["latency_ms"] or 0)))
+    red, amber = sum(r["status"] == "red" for r in rows), sum(r["status"] == "amber" for r in rows)
+    idle = sum(1 for r in rows if r["note"]) + len(broken)
+    notes = ["Each tunnel graded on loss after FEC, latency, jitter and MOS against the Orchestrator's health thresholds: loss {} / {} %, latency {} / {} ms, jitter {} / {} ms, MOS {} / {}.".format(
+        *(limits["packetLoss"] + limits["latency"] + limits["jitter"] + limits["mos"])),
+             "Under {} packets received in the period a loss % means little, so a tunnel that lost probes there is shown as \"no traffic, probes lost\" and counted red: "
+             "usually a broken path or a dead configuration.".format(floor)]
+    if broken:
+        notes.append("{} tunnels with no traffic and lost probes are listed apart and left out of the status (option: down tunnels separate): {}{}.".format(
+            len(broken), "; ".join("{} {}".format(r["appliance"], r["tunnel"]) for r in broken[:25]), "; and {} more".format(len(broken) - 25) if len(broken) > 25 else ""))
+    if len(rows) > 25:
+        notes.append("Worst 25 shown; {} more tunnels not shown.".format(len(rows) - 25))
+    return {"status": worst([r["status"] for r in rows]), "table": rows[:25], "notes": notes,
+            "metrics": [metric("paths_measured", len(rows), "tunnels", "Tunnels graded"),
+                        metric("paths_red", red, "tunnels", "Tunnels outside the health thresholds", "red" if red else "green"),
+                        metric("paths_amber", amber, "tunnels", "Tunnels between the health thresholds", "amber" if amber else "green"),
+                        metric("paths_idle_probe_loss", idle, "tunnels", "Tunnels with no traffic and lost probes ({})".format("left out" if separate else "counted red"),
+                               None if separate else ("red" if idle else "green"))]}
+
+
+def _when(ms: Any) -> str:
+    return datetime.fromtimestamp(float(ms) / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M") if isinstance(ms, (int, float)) and ms > 0 else ""
+
+
+def _failed(entry: Mapping[str, Any]) -> bool:
+    return str(entry.get("completionStatus")).lower() == "false"
+
+
+
+def _incident(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """What the data shows around an incident. Code never names a cause; the narrative may only describe what is here."""
+    data, names, metric, gaps = ctx["data"], ctx["names"], ctx["metric"], ctx["gaps"]
+    inc = data.get("incident") or {}
+    start, end = inc.get("from_ms", 0), inc.get("to_ms", 0)
+    if not data.get("incident_alarms_stored"):
+        gaps.append("Part of the window, or the 24 hours before it, is older than the 7 days of alarms the Orchestrator keeps and is not in the alarm archive "
+                    "(`report store`), so alarms raised then may be missing.")
+    for note in dict.fromkeys(data.get("incident_alarm_notes") or []):  # the alarm-id lookup and the window read can say the same thing
+        gaps.append("Alarms: " + note)
+    get_only_list = data.get("incident_alarm_source") == "GET /alarm/correlatedAlarms"
+    if get_only_list:
+        gaps.append("Alarms come from the correlated alarm list (GET-only): it is empty when alarm correlation is off, and closed alarms carry no clear time, "
+                    "so alarms raised before the window that closed since cannot be placed, and time to clear and alarms still open are not shown.")
+    if data.get("incident_dropped"):
+        gaps.append("{} more appliances had alarms in the window; only the {} with the most are covered.".format(data["incident_dropped"], INCIDENT_MAX_APPLIANCES))
+    # Alarms open at any time in the window: raised before its end, and not cleared before its start.
+    alarms = []
+    for a in data.get("incident_alarms") or []:
+        raised, cleared = a.get("timeOccurredInMills") or 0, a.get("clearedTimeInMills") or 0
+        if cleared or not a.get("closed"):
+            if raised <= end and (not cleared or cleared >= start):
+                alarms.append(a)
+        elif start <= raised <= end:  # closed without a clear time (GET-only correlated list): only those raised in the window
+            alarms.append(a)
+    # Alarms raised in the window first (they are the incident), then the ones that were already open; oldest first within each.
+    alarms.sort(key=lambda a: (not start <= (a.get("timeOccurredInMills") or 0) <= end, a.get("timeOccurredInMills") or 0))
+    counts = {sev: sum(1 for a in alarms if str(a.get("severity")).upper() == sev) for sev in ("CRITICAL", "MAJOR", "MINOR", "WARNING")}
+    to_clear = sorted((a["clearedTimeInMills"] - a["timeOccurredInMills"]) / 60000.0 for a in alarms
+                      if isinstance(a.get("clearedTimeInMills"), (int, float)) and a["clearedTimeInMills"] > 0 and isinstance(a.get("timeOccurredInMills"), (int, float)))
+    still_open = None if get_only_list else sum(1 for a in alarms if not a.get("clearedTimeInMills") or a["clearedTimeInMills"] > end)
+    rows = [{"raised": _when(a.get("timeOccurredInMills")), "appliance": names.get(a.get("applianceId"), a.get("applianceId")), "severity": str(a.get("severity") or "").lower(),
+             "alarm": str(a.get("name") or ""), "description": str(a.get("description") or "")[:120],
+             "cleared": _when(a.get("clearedTimeInMills")) or ("closed, time not given" if a.get("closed") else "open"), "minutes_to_clear": round((a["clearedTimeInMills"] - a["timeOccurredInMills"]) / 60000.0, 1)
+             if a.get("clearedTimeInMills") and a.get("timeOccurredInMills") else None} for a in alarms]
+    read = data.get("incident_alarm_source") not in (None, "none") or bool(data.get("incident_alarms"))
+    alarm_status = "grey" if not read else "red" if counts["CRITICAL"] else "amber" if counts["MAJOR"] else "green"
+    sections: Dict[str, Dict[str, Any]] = {}
+    sections["inc-timeline"] = {"status": alarm_status, "table": rows[:40],
+                                "metrics": [metric("inc_alarms", len(alarms), "alarms", "Alarms open in the window"),
+                                            metric("inc_critical", counts["CRITICAL"], "alarms", "Critical alarms"), metric("inc_major", counts["MAJOR"], "alarms", "Major alarms"),
+                                            metric("inc_open_at_end", still_open, "alarms", "Still open at the end of the window"),
+                                            metric("inc_median_clear_min", round(statistics.median(to_clear), 1) if to_clear else None, "minutes", "Median time to clear"),
+                                            metric("inc_max_clear_min", round(to_clear[-1], 1) if to_clear else None, "minutes", "Longest time to clear")],
+                                "notes": ["Every alarm open at any time in the window: those raised in it first, then those already open, oldest first within each{}.".format(
+                                    "; first 40 of {} shown".format(len(rows)) if len(rows) > 40 else "")]}
+    # Reachability of each affected appliance inside the window, from the minute samples.
+    limits = _target_limits(ctx, "reachability")
+    app_rows = []
+    for ne in inc.get("affected") or []:
+        samples = reach = 0.0
+        for key, value in data.items():
+            if key.startswith("reach_minutes:{}:".format(ne)) and isinstance(value, dict):
+                for row in value.get("data") or []:
+                    if isinstance(row, dict) and start <= float(row.get("timestamp") or 0) * 1000 <= end:
+                        samples += float(row.get("samplecount") or 0)
+                        reach += float(row.get("appliancereachability") or 0)
+        pct = _pct(reach, samples)
+        app_rows.append({"appliance": names.get(ne, ne), "alarms": sum(1 for a in alarms if a.get("applianceId") == ne), "reachable_pct": pct, "status": band(pct, limits)})
+    sections["inc-appliances"] = {"status": worst([r["status"] for r in app_rows]) if app_rows else "grey", "table": app_rows,
+                                  "metrics": [metric("inc_affected", len(app_rows), "appliances", "Appliances affected")],
+                                  "notes": ["Affected: the --scope appliances, else those with alarms raised in the window (at most {}). Reachability from minute samples.".format(INCIDENT_MAX_APPLIANCES)]}
+    sections["inc-paths"] = _paths(dict(ctx, names={ne: names.get(ne, ne) for ne in inc.get("affected") or []}))
+    sections["inc-paths"].setdefault("notes", []).insert(0, "Statistics basis: {} buckets (finer data is no longer kept for older windows).".format(inc.get("granularity", "?")))
+    # Changes: the audit log in the window and the 24 hours before it.
+    changes = sorted([r for r in data.get("incident_audit") or [] if isinstance(r, dict) and start - INCIDENT_LOOKBACK_MS <= (r.get("queuedTime") or 0) <= end],
+                     key=lambda r: r.get("queuedTime") or 0)
+    before = [r for r in changes if r.get("queuedTime", 0) < start]
+    full = data.get("incident_audit_full") or []
+    for page in full:
+        gaps.append("Changes{}: the audit log returned its limit of {} entries, newest first, so nothing before {} UTC is shown (a busy audit log). "
+                    "A full audit trail needs a remote log receiver (syslog or HTTPS).".format(
+                        " for " + str(names.get(page["appliance"], page["appliance"])) if page.get("appliance") else "", AUDIT_PAGE, _when(page["oldest"])))
+    read_ok = data.get("incident_audit_ok", True)
+    if not read_ok:
+        gaps.append("Changes: the audit log could not be read for every appliance in scope.")
+    # A count that a full page may have cut is not shown as a number: before is cut whenever a page is full, during if a page
+    # reached back no further than the window's start.
+    reached = max((page["oldest"] for page in full), default=None)  # "during" is complete only if every full page reached back before the start
+    n_before = None if full or not read_ok else len(before)
+    n_during = None if not read_ok or (reached is not None and reached > start) else len(changes) - len(before)
+    sections["inc-changes"] = {"status": "grey" if not read_ok and not changes else "green",
+                               "table": [{"time": _when(r.get("queuedTime")), "when": "before" if r.get("queuedTime", 0) < start else "during", "user": r.get("user"),
+                                          "action": str(r.get("name") or "").strip(), "appliance": names.get(r.get("nepk"), r.get("nepk") or ""),
+                                          "result": "failed" if _failed(r) else "ok"} for r in changes][-40:],
+                               "metrics": [metric("inc_changes_before", n_before, "changes", "Changes in the 24 hours before"),
+                                           metric("inc_changes_during", n_during, "changes", "Changes during the window")],
+                               "notes": ["Shown next to the alarms so a reader can compare times; the report does not say whether any change caused the incident. Newest 40 shown."]}
+    sections["inc-summary"] = {"status": worst([alarm_status, sections["inc-appliances"]["status"], sections["inc-paths"]["status"]]),
+                               "metrics": ["inc_alarms", "inc_critical", "inc_affected", "inc_open_at_end", "inc_changes_before", "inc_changes_during"],
+                               "notes": ["Window {} to {} UTC{}.".format(_when(start), _when(end), " (around alarm {})".format(inc["alarm_id"]) if inc.get("alarm_id") else "")]}
+    return sections
+
+
+def _noc(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    data, inventory, names, metric, gaps, now_s = ctx["data"], ctx["inventory"], ctx["names"], ctx["metric"], ctx["gaps"], ctx["now_s"]
+    sections: Dict[str, Dict[str, Any]] = {}
+    # Appliance state now.
+    counts = {name: 0 for name in STATE_NAMES.values()}
+    state_of: Dict[Any, str] = {}
+    for a in inventory:
+        state_of[a.get("nePk")] = STATE_NAMES.get(a.get("state"), "state {}".format(a.get("state")))
+        counts[state_of[a.get("nePk")]] = counts.get(state_of[a.get("nePk")], 0) + 1
+    not_normal = len(inventory) - counts["normal"]
+    share = _pct(not_normal, len(inventory))
+    state_status = "grey" if not inventory else "green" if not not_normal else "red" if share > 10 else "amber"
+    paused = set(((data.get("maintenance") or {}).get("pauseOrchestration") or []) if isinstance(data.get("maintenance"), dict) else [])
+    sections["noc-appliances"] = {"status": state_status, "metrics": [metric("state_" + name.replace(" ", "_"), counts[name], "appliances", "Appliances " + name)
+                                                                      for name in STATE_NAMES.values()],
+                                  "table": [{"appliance": names[ne], "state": st, "maintenance": "yes" if ne in paused else ""} for ne, st in sorted(state_of.items(), key=lambda i: str(names[i[0]])) if st != "normal"],
+                                  "notes": ["Rule: any appliance not normal is amber; more than 10% is red."]}
+
+    # Active alarms: the list through the read POST, else the GET totals and per-appliance counts.
+    sev_counts: Dict[str, Optional[int]] = {"critical": 0, "major": 0, "minor": 0, "warning": 0}
+    per_ne: Dict[Any, Dict[str, int]] = {}
+    rows: List[Dict[str, Any]] = []
+    active = data.get("active_alarms")
+    if isinstance(active, list) and len(active) >= MAX_ALARMS:
+        gaps.append("Active alarms: the list reached the {}-alarm cap, so the counts may be low.".format(MAX_ALARMS))
+    if isinstance(active, list):
+        for alarm in active:
+            sev = str(alarm.get("severity") or "").lower()
+            if sev in sev_counts:
+                sev_counts[sev] += 1
+                per_ne.setdefault(alarm.get("applianceId"), {}).setdefault(sev, 0)
+                per_ne[alarm.get("applianceId")][sev] += 1
+            if sev in ("critical", "major") and len(rows) < 15:
+                since = alarm.get("timeOccurredInMills")
+                rows.append({"appliance": names.get(alarm.get("applianceId"), alarm.get("applianceId")), "severity": sev, "description": str(alarm.get("description") or "")[:160],
+                             "since": datetime.fromtimestamp(since / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M") if isinstance(since, (int, float)) else ""})
+        source = "POST /alarm/appliance (active)"
+    else:
+        summary = data.get("alarm_summary") if isinstance(data.get("alarm_summary"), dict) else None
+        counts = data.get("alarm_counts")
+        for item in counts if isinstance(counts, list) else []:
+            if isinstance(item, dict) and item.get("applianceId") in names:
+                per_ne[item["applianceId"]] = {sev: int(item.get("numOf{}Alarms".format(sev.title())) or 0) for sev in ("critical", "major", "minor", "warning")}
+        if isinstance(counts, list):  # only the appliances in scope; GET /alarm/summary is network-wide
+            sev_counts = {sev: sum(c.get(sev, 0) for c in per_ne.values()) for sev in sev_counts}
+        elif ctx["options"].get("scope", "all") == "all":
+            sev_counts = {sev: summary.get("numOf{}Alarms".format(sev.title())) if summary else None for sev in sev_counts}
+        else:  # a scoped report must not show fleet-wide totals
+            sev_counts = {sev: None for sev in sev_counts}
+            gaps.append("Active alarms: GET /alarm/count/appliance gave nothing and GET /alarm/summary is network-wide, so the scoped counts are not shown.")
+        rows = [{"appliance": names[ne], "critical": c.get("critical", 0), "major": c.get("major", 0), "minor": c.get("minor", 0), "warning": c.get("warning", 0)}
+                for ne, c in sorted(per_ne.items(), key=lambda i: (-i[1].get("critical", 0), -i[1].get("major", 0)))][:15]
+        source = "GET /alarm/summary and GET /alarm/count/appliance (counts only; the alarm list needs the read POST)"
+    alarm_status = "grey" if sev_counts["critical"] is None else "red" if sev_counts["critical"] else "amber" if sev_counts["major"] else "green"
+    retention = (data.get("alarm_retention") or {}).get("historical_appliance_alarm", {}).get("retention") if isinstance(data.get("alarm_retention"), dict) else None
+    notes = ["Source: " + source + "."]
+    if isinstance(retention, (int, float)):
+        notes.append("This Orchestrator keeps {:g} days of alarm history.".format(retention / 86400))
+    sections["noc-alarms"] = {"status": alarm_status, "notes": notes, "table": rows,
+                              "metrics": [metric("active_" + sev, n, "alarms", "Active {} alarms".format(sev)) for sev, n in sev_counts.items()]}
+
+    # Health: share of appliance-hours in good health (POST /health hourly entries; blank hours are not counted).
+    health = data.get("health")
+    health_ids, health_status, seen = [], "grey", set()
+    bad_hours: Dict[Any, int] = {}
+    if isinstance(health, dict):
+        for window, seconds in (("24h", 86400), ("7d", 7 * 86400)):
+            total = good = 0
+            for ne, entries in health.items():
+                for entry in entries if isinstance(entries, list) and ne in names else []:
+                    status = str(entry.get("status") or "").upper()
+                    if entry.get("blank") or not status or float(entry.get("time") or 0) < now_s - seconds:
+                        continue
+                    seen.add(status)
+                    total += 1
+                    good += status in GOOD_HEALTH
+                    if window == "24h" and status not in GOOD_HEALTH:
+                        bad_hours[ne] = bad_hours.get(ne, 0) + 1
+            pct = _pct(good, total)
+            health_ids.append(metric("health_good_{}_pct".format(window), pct, "%", "Appliance-hours in good health, last {}".format(window), band(pct, (95.0, 99.0))))
+        health_status = metrics_status(ctx, health_ids[0])
+    else:
+        gaps.append("Health: POST /health did not run, so hourly health is not shown.")
+        health_ids = [metric("health_good_24h_pct", None, "%", "Appliance-hours in good health, last 24h"), metric("health_good_7d_pct", None, "%", "Appliance-hours in good health, last 7d")]
+    sections["noc-health"] = {"status": health_status, "metrics": health_ids,
+                              "notes": ["Rule (the report's own rule: the Orchestrator has no setting for it): at least 99% of appliance-hours healthy is green, 95% amber, less red. Statuses seen: {}.".format(", ".join(sorted(seen)) or "none")]}
+
+    # Tunnels down now, from the cached tunnel state (one network-wide read each).
+    tunnel_ids, tunnel_rows, tunnel_status = [], [], []
+    down_per_ne: Dict[Any, int] = {}
+    for kind, key in (("physical", "tunnels_physical"), ("bonded", "tunnels_bonded")):
+        value = data.get(key)
+        if not isinstance(value, dict):
+            tunnel_ids += [metric("tunnels_{}_down".format(kind), None, "tunnels", "{} tunnels down".format(kind.title()))]
+            continue
+        total = down = 0
+        for ne, tunnels in value.items():
+            for tunnel in (tunnels.values() if isinstance(tunnels, dict) and ne in names else []):
+                total += 1
+                if not str(tunnel.get("operStatus") or "").lower().startswith("up"):
+                    down += 1
+                    down_per_ne[ne] = down_per_ne.get(ne, 0) + 1
+                    if len(tunnel_rows) < 30:
+                        tunnel_rows.append({"appliance": names[ne], "kind": kind, "tunnel": tunnel.get("alias"), "state": tunnel.get("operStatus")})
+        share = _pct(down, total)
+        tunnel_status.append("grey" if not total else "green" if not down else "red" if share > 10 else "amber")
+        tunnel_ids += [metric("tunnels_{}_down".format(kind), down, "tunnels", "{} tunnels down".format(kind.title()), tunnel_status[-1]),
+                       metric("tunnels_{}_total".format(kind), total, "tunnels", "{} tunnels".format(kind.title()))]
+    sections["noc-tunnels"] = {"status": worst(tunnel_status), "metrics": tunnel_ids, "table": tunnel_rows,
+                               "notes": ["Rule: any tunnel not up is amber; more than 10% of tunnels is red. Bonded tunnels are the overlays."]}
+
+    # Sites needing attention: a fixed score so the order is reproducible.
+    scored = []
+    for ne, name in names.items():
+        alarms = per_ne.get(ne, {})
+        score = (100 if state_of.get(ne) != "normal" else 0) + 10 * alarms.get("critical", 0) + 3 * alarms.get("major", 0) + 2 * down_per_ne.get(ne, 0) + bad_hours.get(ne, 0)
+        if score:
+            scored.append({"appliance": name, "state": state_of.get(ne), "critical": alarms.get("critical", 0), "major": alarms.get("major", 0),
+                           "tunnels_down": down_per_ne.get(ne, 0), "unhealthy_hours_24h": bad_hours.get(ne, 0), "score": score})
+    scored.sort(key=lambda r: -r["score"])
+    sections["noc-worst"] = {"status": "green" if not scored else worst([state_status, alarm_status, worst(tunnel_status)]), "table": scored[:10],
+                             "metrics": [metric("sites_needing_attention", len(scored), "appliances", "Appliances needing attention")],
+                             "notes": ["Score: not normal 100, each critical alarm 10, each major 3, each tunnel down 2, each unhealthy hour 1."]}
+    sections["noc-summary"] = {"status": worst([state_status, alarm_status, health_status, worst(tunnel_status)]),
+                               "metrics": ["state_unreachable", "active_critical", "active_major", "tunnels_bonded_down", "health_good_24h_pct", "sites_needing_attention"]}
+    return sections
+
+
+def metrics_status(ctx: Dict[str, Any], mid: str) -> str:
+    return ctx["metrics"][mid].get("status") or "grey"
+
+
+def _capacity(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    data, names, metric, gaps = ctx["data"], ctx["names"], ctx["metric"], ctx["gaps"]
+    links = wan_links(data, names)
+    basis = data.get("capacity_basis") or {"granularity": "hour", "retention_known": True}
+    bucket = 86400 if basis.get("granularity") == "day" else 3600
+    if not basis.get("retention_known"):
+        gaps.append("Capacity: hourly retention not readable from GET /gms/stats/retention; {:g} days assumed.".format(HOURLY_RETENTION / 86400))
+    limits = health_limits(data, "bwUtilization", gaps) if links else DEFAULT_HEALTH["bwUtilization"]
+    rows = []
+    for link in links:
+        hourly = data.get("hourly:{}:{}".format(link["nePk"], link["interface"]))
+        tx, rx = [], []
+        for row in hourly if isinstance(hourly, list) else []:
+            # Each hourly row carries the configured bandwidth (kbps) at that time.
+            for values, key, bw in ((tx, "tx_bytes", "max_bw_tx"), (rx, "rx_bytes", "max_bw_rx")):
+                pct = _util(float(row.get(key) or 0), bucket, float(row.get(bw) or 0))
+                if pct is not None:
+                    values.append(pct)
+        p95_tx, p95_rx = _p95(tx), _p95(rx)
+        peak = max([v for v in (p95_tx, p95_rx) if v is not None], default=None)
+        rows.append({"appliance": names.get(link["nePk"], link["nePk"]), "interface": link["interface"], "label": link["label"],
+                     "outbound_mbps": round(link["bw_tx"] / 1000, 1), "inbound_mbps": round(link["bw_rx"] / 1000, 1),
+                     "avg_out_pct": link["avg_tx_pct"], "avg_in_pct": link["avg_rx_pct"], "p95_out_pct": p95_tx, "p95_in_pct": p95_rx,
+                     "buckets": max(len(tx), len(rx)), "status": _load_status(peak, limits)})
+    measured = [r for r in rows if r["status"] != "grey"]
+    flagged = [r for r in measured if r["status"] in ("amber", "red")]
+    worst_p95 = max([max(v for v in (r["p95_out_pct"], r["p95_in_pct"]) if v is not None) for r in measured], default=None)
+    status = "grey" if not measured else worst([r["status"] for r in measured])
+    rows.sort(key=lambda r: (r["status"] == "grey", -max(r["p95_out_pct"] or 0, r["p95_in_pct"] or 0), -max(r["avg_out_pct"] or 0, r["avg_in_pct"] or 0)))
+    if not links:
+        gaps.append("Capacity: no WAN interfaces found (POST /stats/aggregate/interface, or GET /stats/timeseries/interfaceOverlay under GET-only).")
+    window = "P95 of hourly averages over the part of the period inside hourly retention; hourly averages understate short bursts." if bucket == 3600 else \
+        "P95 of daily averages: the period is older than the hourly data the Orchestrator keeps, and daily averages understate peaks much more than hourly ones."
+    notes = [window, "Outbound = WAN Tx, inbound = WAN Rx, against the configured bandwidth. Rule: P95 at or above {:g}% is amber, {:g}% red (bwUtilization limits).".format(*sorted(limits)),
+             "Links ranked by average utilisation from {}; only the top ones get a P95, the rest stay grey.".format(links[0]["source"] if links else "the interface totals")]
+    if len(rows) > 30:
+        notes.append("{} more links not shown.".format(len(rows) - 30))
+    m_flag = metric("links_flagged", len(flagged) if measured else None, "links", "WAN links at or above {:g}% P95".format(min(limits)), status)
+    sections = {"cap-links": {"status": status, "metrics": [m_flag], "table": rows[:30], "notes": notes,
+                              "chart": {"title": "Highest WAN P95 utilisation, % of configured bandwidth", "zoom": False,
+                                        "points": [("{} {}".format(r["appliance"], r["interface"]), max(r["p95_out_pct"] or 0, r["p95_in_pct"] or 0), r["status"]) for r in rows if r["status"] != "grey"][:20]}}}
+    sections["cap-summary"] = {"status": status, "metrics": [m_flag, metric("worst_p95_pct", worst_p95, "%", "Highest WAN P95 utilisation", _load_status(worst_p95, limits)),
+                                                             metric("links_measured", len(measured), "links", "WAN links with a P95"),
+                                                             metric("wan_links", len(links), "links", "WAN links found")]}
+    return sections
+
+
+def _lifecycle(ctx: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    data, inventory, names, metric, gaps, now_s = ctx["data"], ctx["inventory"], ctx["names"], ctx["metric"], ctx["gaps"], ctx["now_s"]
+    sections: Dict[str, Dict[str, Any]] = {}
+    groups: Dict[Tuple[str, str], int] = {}
+    for a in inventory:
+        key = (str(a.get("model") or "unknown"), str(a.get("softwareVersion") or "unknown"))
+        groups[key] = groups.get(key, 0) + 1
+    versions = {v for _, v in groups}
+    trains = {".".join(map(str, _version(v)[:2])) or v for v in versions}
+    sw_status = "grey" if not inventory else "green" if len(trains) <= 1 else "amber"
+    orch_version = (data.get("versions") or {}).get("current") if isinstance(data.get("versions"), dict) else None
+    sections["life-inventory"] = {"status": sw_status, "table": [{"model": m, "ecos": v, "appliances": n} for (m, v), n in sorted(groups.items(), key=lambda i: (-i[1], i[0]))],
+                                  "metrics": [metric("ecos_versions", len(versions), "versions", "Distinct ECOS builds"),
+                                              metric("ecos_trains", len(trains), "trains", "Distinct ECOS trains (major.minor)", sw_status),
+                                              metric("orchestrator_version", orch_version, "", "Orchestrator release")],
+                                  "notes": ["Rule: more than one ECOS train in use is amber."]}
+
+    # Licences: the Orchestrator's, and each portal-licensed appliance's expiry (epoch ms) where the portal gives one.
+    lic = data.get("gms_license") if isinstance(data.get("gms_license"), dict) else None
+    days = lic.get("daysToExpiration") if lic else None
+    portal = data.get("portal_appliances")
+    expiring, lic_rows = {30: 0, 90: 0}, []
+    for item in (portal.get("data") or []) if isinstance(portal, dict) else []:
+        expiry = item.get("expirationDate") if isinstance(item, dict) else None
+        if isinstance(expiry, (int, float)) and item.get("applianceId") in names:
+            left = int((expiry / 1000 - now_s) // 86400)
+            for limit in expiring:
+                expiring[limit] += left <= limit
+            if left <= 90:
+                lic_rows.append({"appliance": names[item["applianceId"]], "days_left": left})
+    portal_dates = any(isinstance(i, dict) and isinstance(i.get("expirationDate"), (int, float)) for i in ((portal or {}).get("data") or [] if isinstance(portal, dict) else []))
+    have = isinstance(days, int) or portal_dates  # a list with no expiry dates says nothing about expiry
+    worst_days = min([d for d in [days] + [r["days_left"] for r in lic_rows] if isinstance(d, int)], default=None)
+    lic_status = "grey" if not have else "green" if worst_days is None else _expiry_status(worst_days)
+    sections["life-licences"] = {"status": lic_status, "table": sorted(lic_rows, key=lambda r: r["days_left"]),
+                                 "metrics": [metric("license_days_left", days, "days", "Days until the Orchestrator licence expires", _expiry_status(days) if isinstance(days, int) else None),
+                                             metric("license_used", lic.get("usedAppliances") if lic else None, "appliances", "Licensed appliances in use"),
+                                             metric("licences_expiring_90", expiring[90] if portal_dates else None, "appliances", "Appliance licences expiring within 90 days"),
+                                             metric("licences_expiring_30", expiring[30] if portal_dates else None, "appliances", "Appliance licences expiring within 30 days")],
+                                 "notes": ["Rule: 30 days or less red, 90 days or less amber."]}
+
+    # Backups: the newest appliance backup each appliance has on the Orchestrator.
+    backup_rows, stale, read = [], 0, 0
+    for ne, name in names.items():
+        history = data.get("backup:" + str(ne))
+        if history is None:
+            continue
+        read += 1
+        times = [float(b.get("backupTime")) for b in history if isinstance(b, dict) and isinstance(b.get("backupTime"), (int, float))] if isinstance(history, list) else []
+        age = int((now_s - max(times)) // 86400) if times else None
+        stale += age is None or age > 30
+        backup_rows.append({"appliance": name, "last_backup": datetime.fromtimestamp(max(times), timezone.utc).strftime("%Y-%m-%d") if times else "none", "days_ago": age})
+    backup_status = "grey" if not read else "amber" if stale else "green"
+    sections["life-backups"] = {"status": backup_status, "table": sorted(backup_rows, key=lambda r: -(r["days_ago"] if r["days_ago"] is not None else 10 ** 6))[:30],
+                                "metrics": [metric("backups_stale", stale if read else None, "appliances", "Appliances without a backup in 30 days", backup_status),
+                                            metric("backups_read", read, "appliances", "Appliances whose backup history was read")],
+                                "notes": ["Rule: an appliance with no backup in the last 30 days is amber."]}
+
+    # Advisories: a dated, hand-kept list (there is no API); Orchestrator entries are checked against its release.
+    hits = []
+    for advisory in ADVISORIES:
+        targets = [("Orchestrator", orch_version)] if advisory["product"] == "orchestrator" else [(names.get(a.get("nePk")), a.get("softwareVersion")) for a in inventory]
+        for target, version in targets:
+            why = advisory_hit(version, advisory)
+            if why:
+                hits.append({"target": target, "version": version, "advisory": advisory["id"], "why": why, "cves": ", ".join(advisory["cves"])})
+    checked = bool(orch_version) or bool(inventory)
+    adv_status = "grey" if not checked else "red" if hits else "green"
+    sections["life-advisories"] = {"status": adv_status, "table": hits[:30],
+                                   "metrics": [metric("advisory_hits", len(hits) if checked else None, "findings", "Advisory findings", adv_status),
+                                               metric("advisories_checked", len(ADVISORIES), "advisories", "Advisories in the list")],
+                                   "notes": ["Advisory list as of {}; there is no API for advisories, so check the HPE security portal for newer ones.".format(ADVISORIES_AS_OF)]
+                                   + ["{}: {}. {}".format(a["id"], a["title"], a["url"]) for a in ADVISORIES]}
+    sections["life-eol"] = {"status": "grey", "metrics": [], "notes": ["No API gives hardware end-of-life dates; not supplied."]}
+    sections["life-summary"] = {"status": worst([sw_status, lic_status, backup_status, adv_status]),
+                                "metrics": ["advisory_hits", "licences_expiring_90", "license_days_left", "backups_stale", "ecos_trains"]}
+    return sections
+
+
+# --- narrative -----------------------------------------------------------------
+
+def template(metrics: Mapping[str, Any]) -> Dict[str, Any]:
+    order = [sid for sid, _ in SECTIONS[metrics["report"]] if sid in metrics["sections"]]  # metrics.json keys are sorted
+    return {"report": metrics["report"], "sections": {sid: {"status": metrics["sections"][sid]["status"], "text": "", "cite": [m for m in metrics["sections"][sid]["metrics"] if m in metrics["metrics"]]} for sid in order}}
+
+
+def validate(metrics: Mapping[str, Any], narrative: Any) -> List[str]:
+    problems: List[str] = []
+    if not isinstance(narrative, dict) or narrative.get("report") != metrics["report"] or not isinstance(narrative.get("sections"), dict):
+        return ["narrative must be {\"report\": \"%s\", \"sections\": {...}}" % metrics["report"]]
+    for sid, section in narrative["sections"].items():
+        if sid not in metrics["sections"]:
+            problems.append("{}: unknown section".format(sid))
+            continue
+        if not isinstance(section, dict) or set(section) - {"status", "text", "cite"}:
+            problems.append("{}: a section has only status, text and cite".format(sid))
+            continue
+        computed = metrics["sections"][sid]["status"]
+        if section.get("status") not in (None, computed):
+            problems.append("{}: status {!r} contradicts the computed status {!r}".format(sid, section.get("status"), computed))
+        text = section.get("text") or ""
+        if not isinstance(text, str) or len(text) > MAX_TEXT:
+            problems.append("{}: text must be a string of at most {} characters".format(sid, MAX_TEXT))
+            continue
+        for mid in _TOKEN.findall(text):
+            if mid not in metrics["metrics"]:
+                problems.append("{}: {{{{m:{}}}}} is not a metric".format(sid, mid))
+        prose = _TOKEN.sub(" ", text)
+        plain = _FIXED_TERMS.sub(" ", prose)
+        figure = re.search(r"\d", plain) or _NUMBER_WORDS.search(plain)
+        if figure:
+            problems.append("{}: bare number in the text; cite numbers only as {{{{m:<metric id>}}}}: {!r}".format(sid, plain[max(0, figure.start() - 20):figure.end() + 20]))
+        if "{{" in prose or "}}" in prose:
+            problems.append("{}: malformed token; use {{{{m:<metric id>}}}}".format(sid))
+        lowered = prose.lower()
+        for status, words in _STATUS_WORDS.items():
+            if status != computed and any(re.search(r"\b" + re.escape(w) + r"\b", lowered) for w in words):
+                problems.append("{}: wording implies {} but the computed status is {}".format(sid, status, computed))
+    return problems
+
+
+# --- render ------------------------------------------------------------------
+
+PAGE = Template("""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>$title</title>
+<style>
+:root{--bg:#14171c;--fg:#e8eaed;--muted:#9aa0a6;--card:#1e2229;--line:#333a44;--green:#3fb950;--amber:#d29922;--red:#f85149;--grey:#8b949e;--bar:#58a6ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:24px 16px}h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:0 0 8px}
+.meta,.note,footer{color:var(--muted);font-size:13px}section{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin:16px 0;break-inside:avoid}
+.status{display:inline-block;font-weight:600;font-size:13px;padding:2px 10px;border-radius:12px;border:1px solid currentColor;margin-bottom:8px}
+.green{color:var(--green)}.amber{color:var(--amber)}.red{color:var(--red)}.grey{color:var(--grey)}
+.banner{border:2px solid var(--red);color:var(--fg);padding:12px 16px;border-radius:8px;margin:16px 0}
+.kpis{display:flex;flex-wrap:wrap;gap:12px;margin:8px 0}.kpi{border:1px solid var(--line);border-radius:6px;padding:8px 12px;min-width:150px}
+.kpi b{display:block;font-size:20px}.kpi span{color:var(--muted);font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}th,td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
+svg{width:100%;height:auto;margin-top:8px}svg text{fill:var(--fg);font-size:11px}svg rect.bar{fill:var(--bar)}svg rect.bar.green{fill:var(--green)}svg rect.bar.amber{fill:var(--amber)}svg rect.bar.red{fill:var(--red)}svg text.axis{fill:var(--muted)}
+.verdict{border:2px solid currentColor;border-radius:8px;padding:12px 16px;margin:16px 0;font-weight:600}
+@media print{@page{size:A4;margin:14mm}:root{--bg:#fff;--fg:#111;--muted:#555;--card:#fff;--line:#ccc;--green:#1a7f37;--amber:#9a6700;--red:#cf222e;--grey:#57606a;--bar:#0969da}main{max-width:none;padding:0}}
+</style></head><body><main>
+<header><h1>$title</h1><div class="meta">$subtitle</div><div class="meta" data-section-id="report-options">$options</div></header>
+$headline
+$banner
+$sections
+<footer><p>Orchestrator $orchestrator, release $version. Data collected $collected for $period. Coverage: $coverage. $options. Bundle SHA-256 $bundle. Generated by edgeconnect-mcp $generator; numbers and statuses are computed by code, the prose only cites them.</p></footer>
+</main></body></html>
+""")
+
+
+def _fmt(metric: Mapping[str, Any], unit_word: bool = True) -> str:
+    """A metric for display; in prose (unit_word False) only % is kept, so "{{m:alarms_critical}} critical alarms" reads right."""
+    value = metric.get("value")
+    if value is None:
+        return "no data"
+    if isinstance(value, float):
+        value = "{:.2f}".format(value)
+    unit = metric.get("unit") or ""
+    if value == 1 and unit.endswith("s"):
+        unit = unit[:-1]  # 1 alarm, 1 appliance
+    return "{}{}".format(value, unit if unit == "%" else (" " + unit if unit and unit_word else ""))
+
+
+def _chart(chart: Mapping[str, Any]) -> str:
+    points, title = chart.get("points") or [], str(chart.get("title") or "")
+    if not points:
+        return ""
+    values = [p[1] for p in points]
+    # Availability zooms so 99.9 and 100 can be told apart; utilisation starts at 0 and may pass 100.
+    floor, ceiling = (min(90.0, min(values)), 100.0) if chart.get("zoom") else (0.0, max(100.0, max(values)))
+    width, row = 640, 18
+    bars = []
+    top = 16  # room for the axis label
+    bars = ['<text x="200" y="11" class="axis">Scale {:g}% to {:g}%{}</text>'.format(floor, ceiling, " (zoomed)" if floor > 0 else "")]
+    for i, point in enumerate(points):
+        label, value = point[0], point[1]
+        status = point[2] if len(point) > 2 and point[2] in STATUSES else ""
+        length = 0 if value <= floor else (value - floor) / (ceiling - floor) * (width - 260)
+        y = top + i * row
+        bars.append('<text x="0" y="{0}">{1}</text><rect class="bar {6}" x="200" y="{2}" width="{3:.1f}" height="12"><title>{1}: {4:.2f}%</title></rect>'
+                    '<text x="{5:.1f}" y="{0}">{4:.2f}%</text>'.format(y + 11, html.escape(str(label)[:28]), y + 1, length, value, 206 + length, status))
+    return '<svg viewBox="0 0 {} {}" role="img" aria-label="{}"><title>{}</title>{}</svg>'.format(width, top + len(points) * row + 4, html.escape(title), html.escape(title), "".join(bars))
+
+
+def _table(rows: List[Mapping[str, Any]]) -> str:
+    if not rows:
+        return ""
+    columns = list(rows[0].keys())
+    cell = lambda v: "no data" if v is None else "{:.2f}".format(v) if isinstance(v, float) else html.escape(str(v))
+    head = "".join("<th>{}</th>".format(html.escape(c)) for c in columns)
+    body = "".join("<tr>{}</tr>".format("".join('<td class="{}">{}</td>'.format(r[c] if c == "status" else "", cell(r[c])) for c in columns)) for r in rows)
+    return "<table><thead><tr>{}</tr></thead><tbody>{}</tbody></table>".format(head, body)
+
+
+def options_line(metrics: Mapping[str, Any]) -> str:
+    """Report options: what the reader needs to know was chosen, for example "down tunnels: separate (37 excluded)"."""
+    o = dict(DEFAULT_OPTIONS, **(metrics.get("options") or {}))
+    scope = "all ({} appliances)".format((metrics.get("coverage") or {}).get("appliances")) if o["scope"] == "all" else ", ".join(o["scope"])
+    target = "Orchestrator thresholds" if o["target"] == "orchestrator" else "{}%".format(o["target"])
+    if metrics["report"] == "incident" and o.get("window"):
+        parts = ["window: {} to {} UTC{}".format(_when(o["window"][0]), _when(o["window"][1]), " (alarm {})".format(o["alarm_id"]) if o.get("alarm_id") else ""), "scope: " + scope]
+    else:
+        parts = ["period: {}{}".format(o["period"], " ({})".format(o.get("month")) if metrics["report"] not in ("noc", "lifecycle") else ""), "scope: " + scope]
+    if metrics["report"] in ("availability", "executive"):
+        count = o.get("down_tunnels_count")
+        parts += ["availability target: " + target,
+                  "down tunnels: {}{}".format(o["down_tunnels"], " ({} down all period and {} idle tunnels losing probes excluded)".format(count, o.get("idle_paths_count") or 0)
+                                              if o["down_tunnels"] == "separate" and count is not None else "")]
+    return "Report options: " + "; ".join(parts)
+
+
+def render(metrics: Mapping[str, Any], narrative: Optional[Mapping[str, Any]] = None) -> str:
+    if narrative is not None:
+        problems = validate(metrics, narrative)
+        if problems:
+            raise ValueError("narrative.json is not valid:\n" + "\n".join(problems))
+    titles = dict(SECTIONS[metrics["report"]])
+    texts = (narrative or {}).get("sections") or {}
+    parts = []
+    for sid in (sid for sid, _ in SECTIONS[metrics["report"]] if sid in metrics["sections"]):  # metrics.json keys are sorted
+        sec = metrics["sections"][sid]
+        text = html.escape((texts.get(sid) or {}).get("text") or "")
+        text = _TOKEN.sub(lambda m: html.escape(_fmt(metrics["metrics"][m.group(1)], unit_word=False)), text)
+        kpis = "".join('<div class="kpi"><b class="{}">{}</b><span>{}</span></div>'.format(metrics["metrics"][mid].get("status") or "", html.escape(_fmt(metrics["metrics"][mid])), html.escape(metrics["metrics"][mid]["label"]))
+                       for mid in sec.get("metrics", []) if mid in metrics["metrics"])
+        notes = "".join('<p class="note">{}</p>'.format(html.escape(n)) for n in sec.get("notes", []))
+        chart = _chart(sec.get("chart") or {})
+        parts.append('<section data-section-id="{0}"><h2>{1}</h2><div class="status {2}">Status: {3}</div>{4}<div class="kpis">{5}</div>{6}{7}{8}</section>'.format(
+            sid, html.escape(titles[sid]), sec["status"], sec["status"].title(), "<p>{}</p>".format(text) if text else "", kpis, chart, _table(sec.get("table") or []), notes))
+    banner = '<div class="banner" data-section-id="stats-store-down">Statistics store down: every statistics call returned HTTP 500, so statistics are missing.</div>' if metrics.get("stats_store_down") else ""
+    coverage = metrics.get("coverage") or {}
+    head = metrics.get("headline")
+    headline = ""
+    if head:
+        tiles = "".join('<div class="kpi"><b class="{}">{}</b><span>{}</span></div>'.format(metrics["metrics"][mid].get("status") or "", html.escape(_fmt(metrics["metrics"][mid])), html.escape(metrics["metrics"][mid]["label"]))
+                        for mid in head["kpis"])
+        headline = '<div class="verdict {0}" data-section-id="verdict">{1}</div><div class="kpis" data-section-id="kpi-strip">{2}</div>'.format(head["status"], html.escape(head["text"]), tiles)
+    now = metrics["period"].get("now_s")
+    as_of = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if now else metrics["collected_at"]
+    period = {"noc": "last 24 hours and 7 days to " + as_of, "lifecycle": "as of " + as_of,
+              "incident": "{} to {} UTC".format(_when(metrics["period"]["from_ms"]), _when(metrics["period"]["to_ms"]))}.get(metrics["report"], metrics["period"]["month"])
+    return PAGE.substitute(
+        title=html.escape("{}, {}".format(TITLES[metrics["report"]], period)),
+        subtitle=html.escape("Orchestrator {} · {}".format(metrics["orchestrator"], period)),
+        options=html.escape(options_line(metrics)), headline=headline, banner=banner, sections="\n".join(parts), orchestrator=html.escape(str(metrics["orchestrator"])), version=html.escape(str(metrics.get("orchestrator_version"))),
+        collected=html.escape(str(metrics["collected_at"])), period=html.escape(period),
+        coverage=html.escape("{} of {} appliances returned data in a per-appliance read".format(coverage.get("with_data"), coverage.get("appliances"))),
+        bundle=html.escape(str(metrics.get("bundle_sha256"))), generator=html.escape(__version__))
+
+
+# --- CLI ---------------------------------------------------------------------
+
+def _load(path: Path) -> Any:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _dump(path: Path, value: Any) -> None:
+    Path(path).write_text(json.dumps(value, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")  # order kept: sections and table columns
+
+
+def _parse_time(text: Optional[str]) -> datetime:
+    if not text:
+        raise ValueError("the incident window needs both --from and --to")
+    value = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(prog="edgeconnect-mcp report", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("collect", help="read the Orchestrator and write bundle.json")
+    p.add_argument("--orchestrator", required=True)
+    p.add_argument("--report", choices=REPORTS, required=True)
+    p.add_argument("--period", choices=OPTIONS["period"], default=DEFAULT_OPTIONS["period"], help="availability and capacity period (default: last-month)")
+    p.add_argument("--month", help="YYYY-MM: an explicit month instead of --period")
+    p.add_argument("--scope", default="all", help="all (default), or comma-separated nePks or host names that this Orchestrator has")
+    p.add_argument("--target", choices=OPTIONS["target"], default=DEFAULT_OPTIONS["target"], help="availability target: the Orchestrator's thresholds (default) or a fixed %%")
+    p.add_argument("--down-tunnels", choices=OPTIONS["down_tunnels"], default=DEFAULT_OPTIONS["down_tunnels"],
+                   help="tunnels down the whole period: include them in the figures (default) or list them separately")
+    p.add_argument("--top", type=int, default=20, help="capacity: WAN links that get an hourly P95 read, busiest first (default 20)")
+    p.add_argument("--from", dest="window_from", help="incident: window start, ISO time (UTC unless it says otherwise), e.g. 2026-10-21T14:00")
+    p.add_argument("--to", dest="window_to", help="incident: window end, ISO time")
+    p.add_argument("--alarm-id", help="incident: build the window around this alarm instead of --from/--to")
+    p.add_argument("--history", type=Path, default=HISTORY_ROOT, help="the alarm archive (default ~/.edgeconnect-mcp/history)")
+    p.add_argument("--out", type=Path, default=Path("."), help="folder for bundle.json")
+    p.add_argument("--dotenv", default=os.environ.get("EDGECONNECT_DOTENV"), help="settings file (default: $EDGECONNECT_DOTENV, else ~/.edgeconnect-mcp/.env, else ./.env)")
+    st = sub.add_parser("store", help="keep the Orchestrator's last 7 days of alarms in the local archive (run it daily from cron or launchd)")
+    st.add_argument("--orchestrator", required=True)
+    st.add_argument("--history", type=Path, default=HISTORY_ROOT)
+    st.add_argument("--dotenv", default=os.environ.get("EDGECONNECT_DOTENV"))
+    for name, help_text in (("compute", "bundle.json -> metrics.json"), ("template", "metrics.json -> narrative skeleton")):
+        q = sub.add_parser(name, help=help_text)
+        q.add_argument("input", type=Path)
+    q = sub.add_parser("validate", help="check narrative.json against metrics.json")
+    q.add_argument("metrics", type=Path)
+    q.add_argument("narrative", type=Path)
+    q = sub.add_parser("render", help="metrics.json [+ narrative.json] -> report.html")
+    q.add_argument("metrics", type=Path)
+    q.add_argument("narrative", type=Path, nargs="?")
+    q.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.command in ("collect", "store"):
+            dotenv = args.dotenv or next((str(path) for path in (HOME_DOTENV, Path(".env")) if path.is_file()), None)
+            server = Server.from_dotenv(dotenv)
+            server.log = lambda line: None
+        if args.command == "store":
+            c = Collector(server, args.orchestrator)
+            nepks = [a["nePk"] for a in c.call("appliances", "/appliance") or [] if a.get("nePk")]
+            summary = pull(c.pager(), History(args.history, c.orchestrator), nepks, c.read_posts, int(time.time() * 1000))
+            for kind, item in summary.items():
+                print("{} {}: {} read, {} new{}{}".format(c.orchestrator, kind, item["read"], item["new"],
+                                                          "; {} windows not read (not covered, retried next run)".format(len(item["failed"])) if item["failed"] else "",
+                                                          "; " + "; ".join(item["notes"]) if item["notes"] else ""))
+            return 1 if any(item["failed"] for item in summary.values()) else 0
+        if args.command == "collect":
+            scope = None if args.scope.strip().lower() == "all" else [a.strip() for a in args.scope.split(",") if a.strip()]
+            if args.report != "incident" and (args.window_from or args.window_to or args.alarm_id):
+                raise ValueError("--from, --to and --alarm-id are only for --report incident")
+            if args.alarm_id and (args.window_from or args.window_to):
+                raise ValueError("give either --alarm-id or --from and --to, not both")
+            window = (_parse_time(args.window_from), _parse_time(args.window_to)) if args.window_from or args.window_to else None
+            bundle = collect(server, args.orchestrator, args.report, args.month, scope, top=args.top, period=args.period, target=args.target, down_tunnels=args.down_tunnels,
+                             window=window, alarm_id=args.alarm_id, history_root=args.history)
+            bundle["sha256"] = hashlib.sha256(json.dumps(bundle, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+            args.out.mkdir(parents=True, exist_ok=True)
+            _dump(args.out / "bundle.json", bundle)
+            failed = sum(1 for c in bundle["calls"] if c["outcome"] in ("error", "skipped"))
+            print("{}: {} calls, {} without data; wrote {}".format(args.orchestrator, len(bundle["calls"]), failed, args.out / "bundle.json"))
+        elif args.command == "compute":
+            out = args.input.with_name("metrics.json")
+            _dump(out, compute(_load(args.input)))
+            print("wrote {}".format(out))
+        elif args.command == "template":
+            print(json.dumps(template(_load(args.input)), indent=1))
+        elif args.command == "validate":
+            problems = validate(_load(args.metrics), _load(args.narrative))
+            for problem in problems:
+                print(problem)
+            if problems:
+                return 1
+            print("narrative is valid")
+        elif args.command == "render":
+            args.out.write_text(render(_load(args.metrics), _load(args.narrative) if args.narrative else None), encoding="utf-8")
+            print("wrote {}".format(args.out))
+    except (ValueError, KeyError, OSError, EdgeConnectError, ToolError) as exc:
+        print("edgeconnect-mcp report: {}".format(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

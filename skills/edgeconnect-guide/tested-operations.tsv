@@ -105,6 +105,7 @@ GET	/gms/sessionTimeout
 GET	/gms/stats/approximateDiskSpace
 GET	/gms/stats/collection
 PUT	/gms/stats/collection
+GET	/gms/stats/nonStatsTable/retention
 GET	/gms/stats/retention
 GET	/gms/versions
 GET	/gmsLicense
@@ -225,6 +226,7 @@ POST	/stats/aggregate/interface
 GET	/stats/aggregate/securityPolicy
 GET	/stats/aggregate/trafficClass
 POST	/stats/aggregate/trafficClass
+GET	/stats/config/availabilityThreshold
 POST	/stats/timeseries/addos/maxTimestamp
 POST	/stats/timeseries/addos/trends/baselineZone
 GET	/stats/timeseries/appliance
@@ -234,6 +236,8 @@ POST	/stats/timeseries/ddosTopTalkers
 POST	/stats/timeseries/ddosTotalStats
 GET	/stats/timeseries/dscp
 GET	/stats/timeseries/flow
+GET	/stats/timeseries/interface
+GET	/stats/timeseries/interfaceOverlay
 GET	/stats/timeseries/internetBreakout
 GET	/stats/timeseries/metrics
 GET	/stats/timeseries/securityPolicy
