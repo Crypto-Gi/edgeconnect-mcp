@@ -34,6 +34,9 @@ PROTOCOL_VERSIONS = MODERN_VERSIONS + LEGACY_VERSIONS
 META = "io.modelcontextprotocol/"
 INVALID_PARAMS, METHOD_NOT_FOUND, HEADER_MISMATCH, UNSUPPORTED_VERSION = -32602, -32601, -32020, -32022
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+# Short per-operation usage notes ("METHOD /path" -> text) that the spec itself lacks; shown by describe_operation.
+_NOTES_FILE = Path(__file__).with_name("op_notes.json")
+OP_NOTES: Dict[str, str] = json.loads(_NOTES_FILE.read_text(encoding="utf-8")).get("notes", {}) if _NOTES_FILE.exists() else {}
 # Generic passthroughs that reach any appliance API or CLI, so the spec cannot constrain what they change.
 PASSTHROUGH_PREFIXES = ("/appliance/rest", "/broadcastCli")
 # The only POSTs treated as reads: they query alarms, interface totals and health, and the API has no GET for them.
@@ -369,10 +372,10 @@ class Server:
         return [
             {"name": "list_orchestrators", "description": "List configured Orchestrators and whether writes and appliance passthrough writes are enabled for each.",
              "inputSchema": {"type": "object", "properties": {}}, "annotations": {"readOnlyHint": True}},
-            {"name": "find_operations", "description": "Search the Orchestrator's own API spec for REST operations by keyword (path, summary, tag).",
+            {"name": "find_operations", "description": "Search the Orchestrator's own API spec for REST operations by keyword (path, summary, tag). has_notes marks operations with usage notes in describe_operation.",
              "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "orchestrator": orch, "method": {"type": "string", "enum": ["GET"] + list(WRITE_METHODS)}, "limit": {"type": "integer"}}, "required": ["query"]},
              "annotations": {"readOnlyHint": True}},
-            {"name": "describe_operation", "description": "Show parameters and request body schema for one REST operation.",
+            {"name": "describe_operation", "description": "Show parameters and request body schema for one REST operation, plus notes (quirks, real defaults, units, needed ids, side effects) where known. Read it before calling an operation.",
              "inputSchema": {"type": "object", "properties": {"method": {"type": "string"}, "path": path, "orchestrator": orch}, "required": ["method", "path"]},
              "annotations": {"readOnlyHint": True}},
             {"name": "api_get", "description": "Run a read-only GET against the Orchestrator REST API.",
@@ -417,10 +420,18 @@ class Server:
                 if score and all(word in text for word in words):
                     scored.append((-score, operation["path"], operation))
             scored.sort(key=lambda item: item[:2])
-            return {"total_matches": len(scored), "operations": [{"method": o["method"], "path": o["path"], "summary": o["summary"], "tags": o["tags"]} for _, _, o in scored[:limit]]}
+            found = [{"method": o["method"], "path": o["path"], "summary": o["summary"], "tags": o["tags"]} for _, _, o in scored[:limit]]
+            for entry in found:
+                if "{} {}".format(entry["method"], entry["path"]) in OP_NOTES:
+                    entry["has_notes"] = True
+            return {"total_matches": len(scored), "operations": found}
         if name == "describe_operation":
             operation = orchestrator.match(str(arguments.get("method") or "").upper(), str(arguments.get("path") or ""))
-            return orchestrator.resolve({key: operation[key] for key in ("method", "path", "summary", "description", "tags", "parameters", "requestBody")})
+            described = orchestrator.resolve({key: operation[key] for key in ("method", "path", "summary", "description", "tags", "parameters", "requestBody")})
+            note = OP_NOTES.get("{} {}".format(operation["method"], operation["path"]))
+            if note:
+                described["notes"] = note
+            return described
         if name == "api_get":
             return self._call(orchestrator, "GET", arguments)
         if name == "api_read_post":
