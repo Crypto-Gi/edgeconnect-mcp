@@ -281,6 +281,18 @@ class McpServerTest(unittest.TestCase):
             _, text = self.call("describe_operation", method="GET", path="/appliance")
             self.assertNotIn("notes", json.loads(text))
 
+    def test_url_notes_shown_for_passthrough_only(self):
+        _, text = self.call("describe_operation", method="POST", path="/appliance/rest/{nePk}")
+        self.assertEqual(json.loads(text)["url_notes"], server.URL_NOTES)
+        _, text = self.call("describe_operation", method="POST", path="/ipObjects/addressGroup")
+        self.assertNotIn("url_notes", json.loads(text))
+
+    def test_bundled_url_notes_are_well_formed(self):
+        self.assertTrue(server.URL_NOTES)
+        for url, note in server.URL_NOTES.items():
+            self.assertFalse(url.startswith("/") or "?" in url, url)
+            self.assertTrue(0 < len(note) <= 500, url)
+
     def test_bundled_notes_file_is_well_formed(self):
         for key, note in server.OP_NOTES.items():
             method, _, path = key.partition(" ")
