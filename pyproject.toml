@@ -8,6 +8,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+edgeconnect_mcp = ["op_notes.json"]
+
 [project]
 name = "edgeconnect-mcp"
 version = "0.3.2"

@@ -4,8 +4,10 @@ import os
 import stat
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
+from edgeconnect_mcp import server
 from edgeconnect_mcp.config import Config, load_config
 from edgeconnect_mcp.errors import ConfigurationError
 from edgeconnect_mcp.server import Orchestrator, RateLimiter, Server, ToolError, high_risk_category
@@ -268,6 +270,35 @@ class McpServerTest(unittest.TestCase):
         self.assertIn('"name"', text)  # $ref resolved
         self.assertIn('"includedIPs"', text)  # nested $ref resolved
         self.assertIn('"#/definitions/Rule"', text)  # recursion stops at the cycle
+
+    def test_notes_shown_by_describe_and_flagged_by_find(self):
+        with mock.patch.dict(server.OP_NOTES, {"POST /ipObjects/addressGroup": "Test note."}, clear=True):
+            _, text = self.call("describe_operation", method="POST", path="/ipObjects/addressGroup")
+            self.assertEqual(json.loads(text)["notes"], "Test note.")
+            _, text = self.call("find_operations", query="addressGroup")
+            flagged = {o["path"]: o.get("has_notes", False) for o in json.loads(text)["operations"]}
+            self.assertTrue(flagged["/ipObjects/addressGroup"])
+            _, text = self.call("describe_operation", method="GET", path="/appliance")
+            self.assertNotIn("notes", json.loads(text))
+
+    def test_url_notes_shown_for_passthrough_only(self):
+        _, text = self.call("describe_operation", method="POST", path="/appliance/rest/{nePk}")
+        self.assertEqual(json.loads(text)["url_notes"], server.URL_NOTES)
+        _, text = self.call("describe_operation", method="POST", path="/ipObjects/addressGroup")
+        self.assertNotIn("url_notes", json.loads(text))
+
+    def test_bundled_url_notes_are_well_formed(self):
+        self.assertTrue(server.URL_NOTES)
+        for url, note in server.URL_NOTES.items():
+            self.assertFalse(url.startswith("/") or "?" in url, url)
+            self.assertTrue(0 < len(note) <= 500, url)
+
+    def test_bundled_notes_file_is_well_formed(self):
+        for key, note in server.OP_NOTES.items():
+            method, _, path = key.partition(" ")
+            self.assertIn(method, ("GET",) + server.WRITE_METHODS, key)
+            self.assertTrue(path.startswith("/"), key)
+            self.assertTrue(0 < len(note) <= 500, key)
 
     def test_get_is_redacted_and_matched_against_spec(self):
         error, text = self.call("api_get", path="/appliance/2.NE", query={"x": 1})
