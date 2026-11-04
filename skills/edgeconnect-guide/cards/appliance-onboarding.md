@@ -3,7 +3,7 @@
 Bringing a new EdgeConnect into Orchestrator: the appliance shows up as discovered, is approved (or auto-approved through a preconfiguration file), and then gets its deployment, overlays and template groups. Covers discovery, approval and denial, preconfiguration files, the configuration wizard, local setup when there is no DHCP, and removal.
 ## Docs
 - [Discovered Appliances](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/overlays/discoverd-appliances/) - approve, deny, show denied devices, account-key approval rule (9.7)
-- [Preconfigure Appliances](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/overlays/preconfig/) - YAML file matched by serial or tag, auto approve (9.7)
+- [Preconfigure Appliances](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/overlays/preconfiguration/) - YAML file matched by serial or tag, auto approve (9.7)
 - [Appliance Configuration Wizard](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/overlays/appliance-wizard/) - guided setup, recommended configuration list (9.7)
 - [Adding a New Appliance](https://arubanetworking.hpe.com/techdocs/sdwan/docs/troubleshooting/add_appliance/) - why an appliance does not appear or register (9.7)
 - [USB-Based Zero Touch Provisioning](https://arubanetworking.hpe.com/techdocs/sdwan/docs/deployments/deploy-html/usb-ztp/) - provisioning without network access at the site (9.7)
