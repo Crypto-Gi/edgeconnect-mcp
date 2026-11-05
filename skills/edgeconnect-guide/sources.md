@@ -1,6 +1,6 @@
 # Sources
 
-The six places the cards link into. Every card link was checked against a page inventory kept by the maintainers (not shipped with the skill). Back to the [router](SKILL.md).
+The six places the cards link into. Every card link is checked against the page list in the repository (`docs/docs-refresh/baseline.tsv`, not shipped with the skill), refreshed monthly. Back to the [router](SKILL.md).
 
 ## 1. Techdocs user guide (Orchestrator)
 

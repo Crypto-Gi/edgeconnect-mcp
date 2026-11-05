@@ -7,6 +7,7 @@ DHCP server and relay settings for LAN interfaces: global server defaults, per-i
 - [DHCP Failover](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/dhcp-failover/) - roles, ports, MCLT, split; appliances older than 9.7.0 (9.6)
 - [DHCP Failover State](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/dhcp-failover-state/) - peer states; appliances older than 9.7.0 (9.6)
 - [Deployment Profiles](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/overlays/dep-profiles/) - where LAN DHCP is applied per interface (9.7)
+- [DHCP Manager](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/dhcp-manager/) - one place for scopes, leases, reservations and failover (9.7)
 ## Key facts
 - Three modes per LAN interface: no DHCP / no RA, DHCP server, or DHCP/BOOTP relay. The global default is used for Router-mode LAN interfaces in profiles and changes only affect new configurations (9.7).
 - Server fields: pool and mask, exclude first and last N addresses, default and maximum lease, gateway, DNS, NTP, NetBIOS servers and node type, failover (9.7).
