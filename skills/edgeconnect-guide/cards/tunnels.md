@@ -3,7 +3,6 @@
 The tunnels between appliances (underlay, bonded overlay, passthrough to third parties), their per-label settings, exceptions that block specific tunnels, and Auto MTU discovery.
 ## Docs
 - [Tunnels Tab](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/tunnels/) - overlay, underlay, passthrough subtabs, statuses (9.7)
-- [Tunnels Template](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/templates/tunnels/) - mode, MTU, fastfail, FEC, IPsec settings (9.7)
 - [Tunnel Exception](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/tunnel-exception/) - stop two appliances forming a tunnel on given labels (9.7)
 - [Schedule Auto MTU Discovery](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/schedule-auto-mtu/) - scheduled MTU discovery (9.7)
 - [Tunnel Troubleshooting](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/tunnel-trouble/) - per-tunnel diagnostics dialog (9.7)

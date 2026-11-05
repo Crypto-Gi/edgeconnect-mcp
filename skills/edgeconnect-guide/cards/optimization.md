@@ -5,7 +5,6 @@ TCP and WAN optimization rules that choose, per flow, Network Memory, compressio
 - [Optimization Policies Tab](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/policy/opt-policies/) - priorities, set actions, TCP acceleration options (9.7)
 - [Optimization Policies Template](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/templates/opt-policies/) - template version of the same rules (9.7)
 - [Optimization Policies best practice](https://developer.arubanetworks.com/edgeconnect/v0.0.0/docs/optimization-policies) - template set to replace (all)
-- [SaaS Optimization Template](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/templates/saas-opt/) - SaaS services to optimize or advertise (9.7)
 - [CLI Reference: Policy Maps (NAT, Optimization, QoS, Shaper)](https://arubanetworking.hpe.com/techdocs/sdwan-PDFs/cli-ref/CLI-Reference_latest.pdf) - optimization map commands (all)
 ## Key facts
 - Set actions: Network Memory (Maximize Reduction, Minimize Latency, Balanced default, Disabled), IP header compression, payload compression, TCP acceleration, protocol acceleration for SSL, SRDF, Citrix and iSCSI (9.7).
