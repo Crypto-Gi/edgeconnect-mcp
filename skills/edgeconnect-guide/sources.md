@@ -1,6 +1,6 @@
 # Sources
 
-The six places the cards link into. Every card link was checked against a page inventory kept by the maintainers (not shipped with the skill). Back to the [router](SKILL.md).
+The six places the cards link into. Every card link is checked against the page list in the repository (`docs/docs-refresh/baseline.tsv`, not shipped with the skill), refreshed monthly. Back to the [router](SKILL.md).
 
 ## 1. Techdocs user guide (Orchestrator)
 
@@ -39,8 +39,8 @@ The six places the cards link into. Every card link was checked against a page i
 
 ## 6. Developer portal: API 9.3 guide
 
-- URL: [Start Here](https://developer.arubanetworks.com/edgeconnect/docs/whats-new)
-- Good for: authentication, websocket API, alarm identifiers and the 9.3 API change. The [Rest API Table for 9.3 Endpoints](https://developer.arubanetworks.com/edgeconnect/docs/rest-api-table-for-93) page maps each pre-9.3 endpoint to its 9.3 replacement, so use it when old scripts or examples fail.
+- URL: [About EdgeConnect SD-WAN](https://developer.arubanetworks.com/edgeconnect/docs/intro) (the guide's first page; sidebar lists the rest)
+- Good for: authentication, websocket API, alarm identifiers and the 9.3 API change. The old "Start Here", "Rest API Table for 9.3 Endpoints" and "Pre 9.3 Orchestrator API Endpoints" pages were unpublished in 2026; the card `api-auth-and-9.3-changes` keeps the key facts, and the Orchestrator spec is the authority for paths.
 - Versions: 9.3 and later; the lab spec (9.7.1) is authoritative for operations.
 - How to read: add `.md` to the page URL.
 

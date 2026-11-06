@@ -3,7 +3,6 @@
 Branch NAT rules and pools that translate overlapping LAN addresses into routable fabric addresses, plus the SaaS NAT policy map and the inter-segment SNAT and DNAT exceptions.
 ## Docs
 - [NAT](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/nat/) - rules, pools, directions, segments (9.7)
-- [SaaS NAT Policies Template](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/templates/nat-policies/) - dynamic and manual NAT policy maps (9.7)
 - [Inter-Segment SNAT Exceptions](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/inter-seg-snat/) - NAT between segments (9.7)
 - [Inter-Segment Routing and DNAT Exceptions](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/inter-seg-dnat/) - DNAT between segments (9.7)
 - [CLI Reference: Policy Maps (NAT, Optimization, QoS, Shaper)](https://arubanetworking.hpe.com/techdocs/sdwan-PDFs/cli-ref/CLI-Reference_latest.pdf) - NAT map commands (all)

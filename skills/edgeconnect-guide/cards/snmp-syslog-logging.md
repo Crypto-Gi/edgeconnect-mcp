@@ -13,6 +13,8 @@ Monitoring and log export. Appliance side: the SNMP agent and trap receivers, lo
 - [Audit logs best practice](https://developer.arubanetworks.com/edgeconnect/v0.0.0/docs/audit-logs) - reading audit logs while a site comes up (all)
 - [CLI Reference: Logging and Monitoring](https://arubanetworking.hpe.com/techdocs/sdwan-PDFs/cli-ref/CLI-Reference_latest.pdf) - logging, alarms, flow-export commands (all)
 - [CLI Reference: Management Access and Security](https://arubanetworking.hpe.com/techdocs/sdwan-PDFs/cli-ref/CLI-Reference_latest.pdf) - `snmp-server` commands (all)
+- [Orchestrator Logs](https://arubanetworking.hpe.com/techdocs/sdwan/docs/white-paper/orchestrator-logs/) - where Orchestrator audit and syslog records live, with sample formats (9.7)
+- [EdgeConnect Appliance Logs](https://arubanetworking.hpe.com/techdocs/sdwan/docs/white-paper/appliance-logs/) - three ways to get appliance logs: template plus receivers, web UI, CLI (9.7)
 ## Key facts
 - SNMP agent supports MIB-II and the EdgeConnect private MIBs, and sends cold and warm start traps plus a trap whenever an alarm is raised or cleared (9.7).
 - Template fields: Enable SNMP, Enable SNMP Traps, default trap community (default `public`), read-only community (default `public`), up to three trap receivers each with host, version, community or v3 user, enabled flag (9.7).

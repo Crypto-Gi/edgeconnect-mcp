@@ -8,6 +8,7 @@ Two things share the name. The appliance resolver (name servers and search domai
 - [Management Services](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/mgmt-svcs/) - source interface the DNS service uses per segment (9.7)
 - [DNS best practice](https://developer.arubanetworks.com/edgeconnect/v0.0.0/docs/dns-1) - server order, source interface, air-gap (all)
 - [CLI Reference: System Settings](https://arubanetworking.hpe.com/techdocs/sdwan-PDFs/cli-ref/CLI-Reference_latest.pdf) - includes the `dns cache` command (all)
+- [DNS Proxy](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/dns-proxy/) - per-appliance DNS proxy view, Server A and B roles, deployment modes (9.7)
 ## Key facts
 - Appliance DNS servers serve only traffic the EdgeConnect generates itself, such as Cloud Portal and Orchestrator lookups. Application identification and the flow table use DNS snooping, not these servers (all).
 - If the appliance cannot resolve names it is isolated from the portal and Orchestrator (all).

@@ -5,6 +5,7 @@ IP SLA rules poll an interface, a ping target, an HTTP/HTTPS URL or a VRRP state
 - [IP SLA Tab](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/policy/ipsla/) - monitor types, down and up actions, six use cases (9.7)
 - [IPSLA best practice](https://developer.arubanetworks.com/edgeconnect/v0.0.0/docs/ipsla) - targets, starting values, SSE and breakout rules (all)
 - [Business Intent Overlays](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/overlays/bios/) - breakout settings the IP SLA tab refers to for IPv6 targets (9.7)
+- [IP SLA Summary](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/monitoring/performance/ip-sla-summary/) - latency, loss, availability and up/down per target over a time range (9.7)
 ## Key facts
 - Monitor choices: Interface (operational state), Ping (IPv4 address), HTTP/HTTPS (needs a 200 response, redirects unsupported), VRRP Monitor (true when Master) (9.7).
 - HTTP/HTTPS monitors must not use a loopback source interface. If the source is a tunnel, a second source interface supplies the packet's source IP. In the URL field, only an https URL needs the scheme written (9.7).

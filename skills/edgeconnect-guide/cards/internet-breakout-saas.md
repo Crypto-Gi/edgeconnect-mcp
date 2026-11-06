@@ -6,9 +6,6 @@ How internet-bound traffic is told apart from fabric traffic and where it goes: 
 - [Internal Subnets](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/overlays/internal-subnets/) - internal subnet list, non-default routes, segments (9.7)
 - [Business Intent Overlays](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/overlays/bios/) - breakout policy order, link selection, IP SLA (9.7)
 - [Internet traffic best practice](https://developer.arubanetworks.com/edgeconnect/v0.0.0/docs/internet-traffic) - routing public IPs back to a data center (all)
-- [SaaS Optimization Template](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/templates/saas-opt/) - advertise and optimize behavior, RTT settings (9.7)
-- [SaaS NAT Policies Template](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/templates/nat-policies/) - dynamic and manual NAT for SaaS (9.7)
-- [SSL for SaaS Template](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/templates/ssl-for-saas/) - certificate side of SaaS optimization (9.7)
 - [Microsoft Office 365](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/cloud/o365/) - overlay layout for Office 365 (9.7)
 - [Zscaler Internet Access](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/cloud/zscaler/) - tunnels to Zscaler (9.7)
 ## Key facts

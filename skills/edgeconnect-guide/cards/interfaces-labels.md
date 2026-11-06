@@ -6,6 +6,7 @@ Appliance interface status and settings (Interfaces tab) and the global interfac
 - [Interface Labels](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/overlays/interface-labels/) - create, edit, delete labels (9.7)
 - [Labels best practice](https://developer.arubanetworks.com/edgeconnect/v0.0.0/docs/labels) - naming and label strategy (all)
 - [CLI Reference: Interfaces](https://arubanetworking.hpe.com/techdocs/sdwan-PDFs/cli-ref/CLI-Reference_latest.pdf) - interface commands (all)
+- [ARP Tab](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/configuration/network/arp/) - ARP and neighbor tables per appliance, add or delete static entries (9.7)
 ## Key facts
 - WAN labels name the circuit (MPLS, INET1, LTE); tunnels form between WAN labels per the overlay. LAN labels name traffic types and can match traffic into overlays or be used in rules (9.7).
 - Labels are global; Orchestrator pushes them to the appliances it manages. Renaming a label renames the tunnels that use it and affects availability statistics (9.7).

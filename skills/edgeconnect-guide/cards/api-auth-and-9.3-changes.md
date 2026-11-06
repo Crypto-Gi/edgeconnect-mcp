@@ -3,12 +3,9 @@
 How callers authenticate to the Orchestrator REST API (API key or session with CSRF token), how Orchestrator-level and appliance-level APIs differ, and how the 9.3 rewrite of endpoint paths (path parameters became query parameters) explains old scripts and examples that fail. Includes the legacy (interop) switch and the Postman collection.
 ## Docs
 - [API Key](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/orchestrator/server/api-key/) - key fields, permissions, expiry, IP allow list, header or query use (9.7)
-- [Role Based Access Control](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/orchestrator/server/rbac/) - what a key or user may call (9.7)
-- [Start Here](https://developer.arubanetworks.com/edgeconnect/docs/whats-new) - the 9.3 breaking change and what to review (9.3)
+- [Role Based Access Control](https://arubanetworking.hpe.com/techdocs/sdwan/docs/orch/orchestrator/server/rbac/) - what a key or user may call, and the pre-9.3 (interop) endpoint switch (9.7)
 - [Authentication (CSRF Token and API Key)](https://developer.arubanetworks.com/edgeconnect/docs/authentication) - session login script, `orchCsrfToken`, creating keys (9.3)
 - [Making API Requests](https://developer.arubanetworks.com/edgeconnect/docs/making-api-requests) - Orchestrator level versus appliance level, keys, base URLs (9.3)
-- [Rest API Table for 9.3 Endpoints](https://developer.arubanetworks.com/edgeconnect/docs/rest-api-table-for-93) - every pre-9.3 path mapped to its 9.3 form (9.3)
-- [Pre 9.3 Orchestrator API Endpoints](https://developer.arubanetworks.com/edgeconnect/docs/pre-93-orchestrator-api-end-points) - interop list and the legacy switch (9.3)
 - [Postman Collection](https://developer.arubanetworks.com/edgeconnect/docs/postman-collection) - fork the HPE workspace and set variables (9.3)
 - [Orchestrator and EdgeConnect API endpoints](https://developer.arubanetworks.com/edgeconnect/docs/aruba-orchestrator-and-edgeconnect-api-endpoints) - where the two API families live (9.3)
 ## Key facts
