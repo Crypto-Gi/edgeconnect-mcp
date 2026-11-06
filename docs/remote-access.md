@@ -126,7 +126,7 @@ Caddy sets `X-Forwarded-For` from the real peer, and arrives from 127.0.0.1, so 
 The image runs as a non-root user and needs nothing from PyPI. Build it from a clone:
 
 ```bash
-git clone https://github.com/Crypto-Gi/edgeconnect-mcp.git
+git clone https://github.com/mirwasay/edgeconnect-mcp.git
 cd edgeconnect-mcp
 docker build -t edgeconnect-mcp .
 ```

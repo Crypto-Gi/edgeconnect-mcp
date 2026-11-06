@@ -3,7 +3,7 @@
 Every client starts the same command, and the server reads `~/.edgeconnect-mcp/.env` (see [Install](../README.md#install)). Any server command from the [install guide](install.md) works in its place.
 
 ```text
-npx -y github:Crypto-Gi/edgeconnect-mcp
+npx -y github:mirwasay/edgeconnect-mcp
 ```
 
 Claude Code, Codex and OpenCode were tested with this server. The VS Code, Cursor, Windsurf and Devin entries use each client's documented MCP config format, with the same command.
@@ -13,7 +13,7 @@ Claude Code, Codex and OpenCode were tested with this server. The VS Code, Curso
 The [plugin](../README.md#2-install) installs the server and both skills (guide and report) together. To add only the server:
 
 ```bash
-claude mcp add edgeconnect -- npx -y github:Crypto-Gi/edgeconnect-mcp
+claude mcp add edgeconnect -- npx -y github:mirwasay/edgeconnect-mcp
 ```
 
 ## Claude Desktop
@@ -25,7 +25,7 @@ In `claude_desktop_config.json`:
   "mcpServers": {
     "edgeconnect": {
       "command": "npx",
-      "args": ["-y", "github:Crypto-Gi/edgeconnect-mcp"]
+      "args": ["-y", "github:mirwasay/edgeconnect-mcp"]
     }
   }
 }
@@ -34,7 +34,7 @@ In `claude_desktop_config.json`:
 ## Codex
 
 ```bash
-codex mcp add edgeconnect -- npx -y github:Crypto-Gi/edgeconnect-mcp
+codex mcp add edgeconnect -- npx -y github:mirwasay/edgeconnect-mcp
 codex mcp list
 ```
 
@@ -48,7 +48,7 @@ In `opencode.json` (project) or `~/.config/opencode/opencode.json`:
   "mcp": {
     "edgeconnect": {
       "type": "local",
-      "command": ["npx", "-y", "github:Crypto-Gi/edgeconnect-mcp"],
+      "command": ["npx", "-y", "github:mirwasay/edgeconnect-mcp"],
       "enabled": true
     }
   }
@@ -67,7 +67,7 @@ In `.vscode/mcp.json`:
     "edgeconnect": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "github:Crypto-Gi/edgeconnect-mcp"]
+      "args": ["-y", "github:mirwasay/edgeconnect-mcp"]
     }
   }
 }
@@ -82,7 +82,7 @@ Cursor uses `~/.cursor/mcp.json` and Windsurf uses `~/.codeium/windsurf/mcp_conf
   "mcpServers": {
     "edgeconnect": {
       "command": "npx",
-      "args": ["-y", "github:Crypto-Gi/edgeconnect-mcp"]
+      "args": ["-y", "github:mirwasay/edgeconnect-mcp"]
     }
   }
 }

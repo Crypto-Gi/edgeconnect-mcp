@@ -4,7 +4,7 @@ Thanks for helping. Issues and pull requests are both welcome.
 
 ## Reporting a problem
 
-Open an [issue](https://github.com/Crypto-Gi/edgeconnect-mcp/issues) with the server version (the release tag you installed), your Orchestrator version, the tool call and the error. Never paste an API key, token, password or a full `.env`; replace addresses and names you don't want public.
+Open an [issue](https://github.com/mirwasay/edgeconnect-mcp/issues) with the server version (the release tag you installed), your Orchestrator version, the tool call and the error. Never paste an API key, token, password or a full `.env`; replace addresses and names you don't want public.
 
 For a security problem, don't post the details publicly: open an issue that only says you have a security report, and a private channel will be arranged.
 

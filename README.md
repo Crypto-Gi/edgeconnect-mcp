@@ -1,7 +1,7 @@
 # edgeconnect-mcp
 
-[![test](https://github.com/Crypto-Gi/edgeconnect-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/Crypto-Gi/edgeconnect-mcp/actions/workflows/test.yml)
-[![release](https://img.shields.io/github/v/release/Crypto-Gi/edgeconnect-mcp)](https://github.com/Crypto-Gi/edgeconnect-mcp/releases)
+[![test](https://github.com/mirwasay/edgeconnect-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/mirwasay/edgeconnect-mcp/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/mirwasay/edgeconnect-mcp)](https://github.com/mirwasay/edgeconnect-mcp/releases)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](pyproject.toml)
 
@@ -23,7 +23,7 @@ You ask in plain language ("which appliances on the lab are unreachable?") inste
 
 > Independent project, not affiliated with or supported by HPE. Provided as is, without warranty: you are responsible for every change made through it, by you or by an assistant you connect. See [NOTICE](NOTICE).
 
-It reads the same `.env` format as [edgeconnect-orchestrator-automation](https://github.com/Crypto-Gi/edgeconnect-orchestrator-automation), so one `.env` can serve both. For bulk firewall and object changes, use that project's CSV workflows instead: they add drift checks, readback and rollback that raw `api_write` calls do not.
+It reads the same `.env` format as [edgeconnect-orchestrator-automation](https://github.com/mirwasay/edgeconnect-orchestrator-automation), so one `.env` can serve both. For bulk firewall and object changes, use that project's CSV workflows instead: they add drift checks, readback and rollback that raw `api_write` calls do not.
 
 ## Tools
 
@@ -70,27 +70,27 @@ The assistant shows you that change. Only after your yes does it repeat the call
 **Install this server** and its two skills (macOS and Linux; needs git, Python 3.9 or later and, for the skills and adding the MCP server to agents, Node.js 18 or later):
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/mirwasay/edgeconnect-mcp/main/install.sh)
 ```
 
 **Install all three** instead (the `edgeconnect-auto` CLI, the `edgeconnect-preconfig` command, this server and their skills): `install-all.sh` asks which repositories to install. The same file is in all three repositories, and `install.sh` is `install-all.sh` with this repository already picked.
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/main/install-all.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/mirwasay/edgeconnect-mcp/main/install-all.sh)
 ```
 
 Three repositories that work together:
 
 | Repository | What it does | Agent skill |
 |---|---|---|
-| [edgeconnect-orchestrator-automation](https://github.com/Crypto-Gi/edgeconnect-orchestrator-automation) | `edgeconnect-auto` CLI: deploys and removes firewall policies, zones, address, service and application groups, application definitions and template-group ACLs from reviewed CSVs, with a dry run, a typed `APPLY` and readback verification. | `managing-edgeconnect-firewall-and-objects` |
-| [edgeconnect-preconfig](https://github.com/Crypto-Gi/edgeconnect-preconfig) | `edgeconnect-preconfig` command: turns an existing appliance into a Jinja2 + CSV preconfiguration template, then builds, validates and, with `upload --approve`, uploads one preconfig per site. | `building-edgeconnect-preconfig-templates` |
-| [edgeconnect-mcp](https://github.com/Crypto-Gi/edgeconnect-mcp) (this repository) | MCP server that lets Claude or any MCP client read, and with your approval change, an Orchestrator through its REST API, plus the `edgeconnect-mcp report` command. | `edgeconnect-guide`, `edgeconnect-report` |
+| [edgeconnect-orchestrator-automation](https://github.com/mirwasay/edgeconnect-orchestrator-automation) | `edgeconnect-auto` CLI: deploys and removes firewall policies, zones, address, service and application groups, application definitions and template-group ACLs from reviewed CSVs, with a dry run, a typed `APPLY` and readback verification. | `managing-edgeconnect-firewall-and-objects` |
+| [edgeconnect-preconfig](https://github.com/mirwasay/edgeconnect-preconfig) | `edgeconnect-preconfig` command: turns an existing appliance into a Jinja2 + CSV preconfiguration template, then builds, validates and, with `upload --approve`, uploads one preconfig per site. | `building-edgeconnect-preconfig-templates` |
+| [edgeconnect-mcp](https://github.com/mirwasay/edgeconnect-mcp) (this repository) | MCP server that lets Claude or any MCP client read, and with your approval change, an Orchestrator through its REST API, plus the `edgeconnect-mcp report` command. | `edgeconnect-guide`, `edgeconnect-report` |
 
 Run either script again to update; the old `setup.sh` still works and runs `install-all.sh`. `install-all.sh` asks a few questions, then does everything else:
 
 1. **Which repositories**: a table of the three, with what each does and the skill it installs; type numbers separated by commas (for example `1,3`) or `all` (the default).
-2. **The MCP server** (only if you pick 3): run it locally (stdio) for your agents, or in Docker over HTTPS, which you install by hand with the [MCP install guide](https://github.com/Crypto-Gi/edgeconnect-mcp/blob/main/docs/install.md), or not at all.
+2. **The MCP server** (only if you pick 3): run it locally (stdio) for your agents, or in Docker over HTTPS, which you install by hand with the [MCP install guide](https://github.com/mirwasay/edgeconnect-mcp/blob/main/docs/install.md), or not at all.
 3. **Which agents**, once, from a table of 20 (Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI, OpenCode, Kilo Code, Kiro CLI, Zed, Windsurf, Cline, Goose, Antigravity, Devin, Roo Code, Continue, Amp, Claude Desktop, and any agent that reads `.agents/skills`). Every picked skill is installed for them, also when it was already installed, and the local MCP server is added to them: through [`add-mcp`](https://www.npmjs.com/package/add-mcp) (without auto-approving tool calls), through `devin mcp add` for Devin, or as a printed config to paste for agents neither covers. Before adding the server it asks to continue, because an existing server named `edgeconnect` in those agents is replaced; with `--yes` it adds the server only when you also pass `--mcp stdio`. It prints each agent's MCP settings file as it goes.
 4. **The install folder** (default: `$EDGECONNECT_HOME` if set, else the folder you run it from, or `~/edgeconnect` from your home folder).
 5. **Where the skills and the MCP server go**, one answer for both: only that folder (the default) or your user account (`~`). Agents that keep MCP servers only for the whole user account (Windsurf, Cline, Goose, Antigravity, Claude Desktop) are asked about one by one when you chose the folder: yes adds the server user-wide for that agent, no skips it. With `--yes` they are skipped, and the last screen lists the command to add each one.
@@ -106,7 +106,7 @@ You need Python 3.9 or later (Linux, macOS or Windows) and an Orchestrator REST 
 ### 1. Add your Orchestrator
 
 ```bash
-curl -fsSL --create-dirs -o ~/.edgeconnect-mcp/.env https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/main/.env.example
+curl -fsSL --create-dirs -o ~/.edgeconnect-mcp/.env https://raw.githubusercontent.com/mirwasay/edgeconnect-mcp/main/.env.example
 chmod 600 ~/.edgeconnect-mcp/.env
 ```
 
@@ -125,19 +125,19 @@ On Windows, save [.env.example](.env.example) as `%USERPROFILE%\.edgeconnect-mcp
 **Claude Code** gets the server and both skills in one go:
 
 ```bash
-claude plugin marketplace add Crypto-Gi/edgeconnect-mcp && claude plugin install edgeconnect@edgeconnect-mcp
+claude plugin marketplace add mirwasay/edgeconnect-mcp && claude plugin install edgeconnect@edgeconnect-mcp
 ```
 
 **Any other MCP client** (Claude Desktop, Codex, OpenCode, VS Code, Cursor, Windsurf, Devin): the server command is
 
 ```bash
-npx -y github:Crypto-Gi/edgeconnect-mcp
+npx -y github:mirwasay/edgeconnect-mcp
 ```
 
 [docs/clients.md](docs/clients.md) has the ready-made config for each client. Then add the [guide](#guide-skill) and [report](#report-skill) skills; it asks which agents to add them to:
 
 ```bash
-npx skills add Crypto-Gi/edgeconnect-mcp
+npx skills add mirwasay/edgeconnect-mcp
 ```
 
 ### 3. Check it
@@ -192,7 +192,7 @@ edgeconnect-mcp report render rep/metrics.json rep/narrative.json --out rep/repo
 
 The Orchestrator keeps 7 days of alarms. `edgeconnect-mcp report store --orchestrator lab` keeps them longer, in `~/.edgeconnect-mcp/history/<nickname>/` (or `--history PATH`), for the availability and incident reports. Only alarms are stored: stats are read live, and the Orchestrator's audit log is not stored (a busy one logs thousands of entries an hour); for a full audit trail, send it to a remote log receiver. Nothing is scheduled for you: run `store` daily from cron or launchd.
 
-`report` comes first, or right after `--dotenv <file>`, which `collect` and `store` then use (that is how the installer's `<folder>/bin/edgeconnect-mcp report ...` works). Where `edgeconnect-mcp` is not on PATH, use `npx -y github:Crypto-Gi/edgeconnect-mcp report ...`, or in a clone `PYTHONPATH=src python3 -m edgeconnect_mcp report ...`.
+`report` comes first, or right after `--dotenv <file>`, which `collect` and `store` then use (that is how the installer's `<folder>/bin/edgeconnect-mcp report ...` works). Where `edgeconnect-mcp` is not on PATH, use `npx -y github:mirwasay/edgeconnect-mcp report ...`, or in a clone `PYTHONPATH=src python3 -m edgeconnect_mcp report ...`.
 
 ## Safety model
 
@@ -243,7 +243,7 @@ Punctuation is ignored when matching (`edge-ha` = `edgeha`), and passthrough wri
 To see exactly what the list refuses on one Orchestrator:
 
 ```bash
-npx -y github:Crypto-Gi/edgeconnect-mcp --list-high-risk lab
+npx -y github:mirwasay/edgeconnect-mcp --list-high-risk lab
 ```
 
 ### Secret redaction
@@ -319,7 +319,7 @@ The tests read `./.env` if one exists, so move your real `.env` out of the repos
 
 ## Contributing
 
-Bug reports, Orchestrator API quirks and fixes are welcome: open an [issue](https://github.com/Crypto-Gi/edgeconnect-mcp/issues), or see [CONTRIBUTING.md](CONTRIBUTING.md) before sending a pull request.
+Bug reports, Orchestrator API quirks and fixes are welcome: open an [issue](https://github.com/mirwasay/edgeconnect-mcp/issues), or see [CONTRIBUTING.md](CONTRIBUTING.md) before sending a pull request.
 
 ## License
 

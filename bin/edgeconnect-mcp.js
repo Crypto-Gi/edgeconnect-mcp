@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Runs the bundled Python server (stdlib only, Python 3.9+) so `npx github:Crypto-Gi/edgeconnect-mcp` works.
+// Runs the bundled Python server (stdlib only, Python 3.9+) so `npx github:mirwasay/edgeconnect-mcp` works.
 "use strict";
 const { spawnSync } = require("child_process");
 const path = require("path");
