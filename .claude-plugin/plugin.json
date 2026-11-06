@@ -3,10 +3,10 @@
   "version": "0.4.2",
   "description": "EdgeConnect Orchestrator MCP server plus the edgeconnect-guide skill (doc map, tested operations, playbooks) and the edgeconnect-report skill (availability, NOC, capacity, lifecycle, incident and executive reports)",
   "author": {
-    "name": "Crypto-Gi"
+    "name": "mirwasay"
   },
   "license": "Apache-2.0",
-  "repository": "https://github.com/Crypto-Gi/edgeconnect-mcp",
+  "repository": "https://github.com/mirwasay/edgeconnect-mcp",
   "keywords": [
     "edgeconnect",
     "aruba",

@@ -6,5 +6,5 @@
   "bin": { "edgeconnect-mcp": "bin/edgeconnect-mcp.js" },
   "files": ["bin/", "src/edgeconnect_mcp/*.py", "src/edgeconnect_mcp/op_notes.json"],
   "engines": { "node": ">=18" },
-  "repository": { "type": "git", "url": "git+https://github.com/Crypto-Gi/edgeconnect-mcp.git" }
+  "repository": { "type": "git", "url": "git+https://github.com/mirwasay/edgeconnect-mcp.git" }
 }

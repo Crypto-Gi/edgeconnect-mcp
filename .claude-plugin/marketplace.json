@@ -2,7 +2,7 @@
   "name": "edgeconnect-mcp",
   "description": "HPE Aruba EdgeConnect Orchestrator MCP server, guide skill and report skill",
   "owner": {
-    "name": "Crypto-Gi"
+    "name": "mirwasay"
   },
   "plugins": [
     {
