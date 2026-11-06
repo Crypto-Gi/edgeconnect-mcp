@@ -197,7 +197,7 @@ The report skill runs `edgeconnect-mcp report ...`; `report` must come right aft
 | Claude Code plugin | the plugin adds no `edgeconnect-mcp` command; use the npx or uvx form |
 | A clone, no install | `PYTHONPATH=src python3 -m edgeconnect_mcp report ...` from the clone |
 
-`setup.sh`'s launcher runs it as `<folder>/bin/edgeconnect-mcp report ...` with the shared `.env`: a `--dotenv` before `report` is passed on to `collect` and `store`.
+The installer's launcher (`install.sh` or `install-all.sh`) runs it as `<folder>/bin/edgeconnect-mcp report ...` with the shared `.env`: a `--dotenv` before `report` is passed on to `collect` and `store`.
 
 ## Skills
 
