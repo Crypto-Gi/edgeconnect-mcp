@@ -162,7 +162,7 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual({name: o.confirm_writes for name, o in server.orchestrators.items()}, {"a": True, "b": False})
 
     def test_report_runs_after_the_dotenv_the_launcher_passes(self):
-        # setup.sh's bin/edgeconnect-mcp runs `python -m edgeconnect_mcp --dotenv <file> "$@"`, so `report` comes second.
+        # install-all.sh's bin/edgeconnect-mcp runs `python -m edgeconnect_mcp --dotenv <file> "$@"`, so `report` comes second.
         from unittest import mock
         import edgeconnect_mcp.server as server_module
         with mock.patch("edgeconnect_mcp.report.main", return_value=0) as report_main, mock.patch.dict(os.environ, {}, clear=False):
