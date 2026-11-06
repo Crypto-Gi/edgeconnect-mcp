@@ -67,6 +67,18 @@ The assistant shows you that change. Only after your yes does it repeat the call
 
 ## The EdgeConnect toolkit
 
+**Install this server** and its two skills (macOS and Linux; needs git, Python 3.9 or later and, for the skills and adding the MCP server to agents, Node.js 18 or later):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/main/install.sh)
+```
+
+**Install all three** instead (the `edgeconnect-auto` CLI, the `edgeconnect-preconfig` command, this server and their skills): `install-all.sh` asks which repositories to install. The same file is in all three repositories, and `install.sh` is `install-all.sh` with this repository already picked.
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/main/install-all.sh)
+```
+
 Three repositories that work together:
 
 | Repository | What it does | Agent skill |
@@ -75,13 +87,7 @@ Three repositories that work together:
 | [edgeconnect-preconfig](https://github.com/Crypto-Gi/edgeconnect-preconfig) | `edgeconnect-preconfig` command: turns an existing appliance into a Jinja2 + CSV preconfiguration template, then builds, validates and, with `upload --approve`, uploads one preconfig per site. | `building-edgeconnect-preconfig-templates` |
 | [edgeconnect-mcp](https://github.com/Crypto-Gi/edgeconnect-mcp) (this repository) | MCP server that lets Claude or any MCP client read, and with your approval change, an Orchestrator through its REST API, plus the `edgeconnect-mcp report` command. | `edgeconnect-guide`, `edgeconnect-report` |
 
-**Install the toolkit: the CLI, the preconfig command, this server and their skills** (macOS and Linux; needs git, Python 3.9 or later and, for the skills and adding the MCP server to agents, Node.js 18 or later):
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Crypto-Gi/edgeconnect-mcp/main/setup.sh)
-```
-
-The same `setup.sh` is in all three repositories. It asks a few questions, then does everything else:
+Run either script again to update; the old `setup.sh` still works and runs `install-all.sh`. `install-all.sh` asks a few questions, then does everything else:
 
 1. **Which repositories**: a table of the three, with what each does and the skill it installs; type numbers separated by commas (for example `1,3`) or `all` (the default).
 2. **The MCP server** (only if you pick 3): run it locally (stdio) for your agents, or in Docker over HTTPS, which you install by hand with the [MCP install guide](https://github.com/Crypto-Gi/edgeconnect-mcp/blob/main/docs/install.md), or not at all.
@@ -89,9 +95,9 @@ The same `setup.sh` is in all three repositories. It asks a few questions, then 
 4. **The install folder** (default: `$EDGECONNECT_HOME` if set, else the folder you run it from, or `~/edgeconnect` from your home folder).
 5. **Where the skills and the MCP server go**, one answer for both: only that folder (the default) or your user account (`~`). Agents that keep MCP servers only for the whole user account (Windsurf, Cline, Goose, Antigravity, Claude Desktop) are asked about one by one when you chose the folder: yes adds the server user-wide for that agent, no skips it. With `--yes` they are skipped, and the last screen lists the command to add each one.
 
-Everything lands in the one folder, from `main`: the repositories, for 1 and 2 a Python environment and the `edgeconnect-auto` (1) and `edgeconnect-preconfig` (2) commands in `~/.local/bin`, for a local MCP server its launcher `<folder>/bin/edgeconnect-mcp`, and one shared `.env`. The last screen shows how to fill in `.env` for what you picked: the Orchestrator lines, the API key, a self-signed certificate, `EC_VALIDATORS` for preconfig and MCP writes. It also writes `AGENTS.md` (which tool an agent should use for which task, and what this folder has installed) and a `CLAUDE.md` that points to it, so start your agent there; an `AGENTS.md` that `setup.sh` wrote and you never edited is kept up to date on every run, and one you have edited is never overwritten (the new text goes to `AGENTS.md.new`). Run it again to update. Options for answering without prompts: `--repos 1,3` (or `all`), `--mcp stdio|docker|no`, `--agents 1,2,15` (numbers or names such as `claude-code,codex`), `--dir PATH`, `--skills folder|home`, `--yes`.
+Everything lands in the one folder, from `main`: the repositories, for 1 and 2 a Python environment and the `edgeconnect-auto` (1) and `edgeconnect-preconfig` (2) commands in `~/.local/bin`, for a local MCP server its launcher `<folder>/bin/edgeconnect-mcp`, and one shared `.env`. The last screen shows how to fill in `.env` for what you picked: the Orchestrator lines, the API key, a self-signed certificate, `EC_VALIDATORS` for preconfig and MCP writes. It also writes `AGENTS.md` (which tool an agent should use for which task, and what this folder has installed) and a `CLAUDE.md` that points to it, so start your agent there; an `AGENTS.md` that the installer wrote and you never edited is kept up to date on every run, and one you have edited is never overwritten (the new text goes to `AGENTS.md.new`). Run it again to update. Options for answering without prompts: `--repos 1,3` (or `all`), `--mcp stdio|docker|no`, `--agents 1,2,15` (numbers or names such as `claude-code,codex`), `--dir PATH`, `--skills folder|home`, `--yes`.
 
-Picking 3 in `setup.sh` installs both of this repository's skills, `edgeconnect-guide` and `edgeconnect-report` (it installs every folder under `skills/`), and, if you choose local, the stdio server for your agents; a Docker server is installed by hand, as [Install](#install) below covers. Its launcher `<folder>/bin/edgeconnect-mcp` also runs the reports: `<folder>/bin/edgeconnect-mcp report ...`.
+Picking 3 in `install-all.sh` (or running this repository's `install.sh`) installs both of this repository's skills, `edgeconnect-guide` and `edgeconnect-report` (it installs every folder under `skills/`), and, if you choose local, the stdio server for your agents; a Docker server is installed by hand, as [Install](#install) below covers. Its launcher `<folder>/bin/edgeconnect-mcp` also runs the reports: `<folder>/bin/edgeconnect-mcp report ...`.
 
 ## Install
 
@@ -186,7 +192,7 @@ edgeconnect-mcp report render rep/metrics.json rep/narrative.json --out rep/repo
 
 The Orchestrator keeps 7 days of alarms. `edgeconnect-mcp report store --orchestrator lab` keeps them longer, in `~/.edgeconnect-mcp/history/<nickname>/` (or `--history PATH`), for the availability and incident reports. Only alarms are stored: stats are read live, and the Orchestrator's audit log is not stored (a busy one logs thousands of entries an hour); for a full audit trail, send it to a remote log receiver. Nothing is scheduled for you: run `store` daily from cron or launchd.
 
-`report` comes first, or right after `--dotenv <file>`, which `collect` and `store` then use (that is how `setup.sh`'s `<folder>/bin/edgeconnect-mcp report ...` works). Where `edgeconnect-mcp` is not on PATH, use `npx -y github:Crypto-Gi/edgeconnect-mcp report ...`, or in a clone `PYTHONPATH=src python3 -m edgeconnect_mcp report ...`.
+`report` comes first, or right after `--dotenv <file>`, which `collect` and `store` then use (that is how the installer's `<folder>/bin/edgeconnect-mcp report ...` works). Where `edgeconnect-mcp` is not on PATH, use `npx -y github:Crypto-Gi/edgeconnect-mcp report ...`, or in a clone `PYTHONPATH=src python3 -m edgeconnect_mcp report ...`.
 
 ## Safety model
 
