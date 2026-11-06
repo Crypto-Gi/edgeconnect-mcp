@@ -668,7 +668,7 @@ HOME_DOTENV = Path.home() / ".edgeconnect-mcp" / ".env"
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    # `report` may follow the --dotenv that setup.sh's launcher always passes; collect and store take it from the environment.
+    # `report` may follow the --dotenv that install-all.sh's launcher always passes; collect and store take it from the environment.
     rest = argv
     if rest[:1] == ["--dotenv"] and len(rest) > 2 and rest[2] == "report":
         os.environ["EDGECONNECT_DOTENV"], rest = rest[1], rest[2:]
